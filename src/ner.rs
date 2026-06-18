@@ -5,7 +5,9 @@
 //!   PRESIDIO_URL   (défaut http://127.0.0.1:5002)
 //!   PRESIDIO_LANG  (défaut en)
 
+use once_cell::sync::Lazy;
 use serde::Deserialize;
+use std::time::Duration;
 
 #[derive(Deserialize, Debug)]
 pub struct PresidioEntity {
@@ -14,8 +16,27 @@ pub struct PresidioEntity {
     /// pas en octets. On les convertit côté Rust (voir `char_slice`).
     pub start: usize,
     pub end: usize,
+    #[allow(dead_code)] // présent dans la réponse ; filtrage déjà fait via score_threshold
     pub score: f32,
 }
+
+/// Timeout (ms) de l'appel Presidio. La détection NER reste best-effort : si
+/// Presidio est lent ou indisponible, on n'attend pas indéfiniment.
+fn timeout_ms() -> u64 {
+    std::env::var("PRESIDIO_TIMEOUT_MS")
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(4000)
+}
+
+/// Client HTTP réutilisé (pool de connexions) avec timeout — évite de recréer un
+/// client par requête et de bloquer `/pseudonymize` si Presidio ne répond pas.
+static CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
+    reqwest::Client::builder()
+        .timeout(Duration::from_millis(timeout_ms()))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+});
 
 fn presidio_url() -> String {
     std::env::var("PRESIDIO_URL").unwrap_or_else(|_| "http://127.0.0.1:5002".to_string())
@@ -27,8 +48,7 @@ fn presidio_lang() -> String {
 
 /// Appelle Presidio /analyze. Renvoie les entités détectées.
 pub async fn analyze(text: &str) -> Result<Vec<PresidioEntity>, reqwest::Error> {
-    let client = reqwest::Client::new();
-    client
+    CLIENT
         .post(format!("{}/analyze", presidio_url()))
         .json(&serde_json::json!({
             "text": text,

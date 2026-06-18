@@ -1,23 +1,39 @@
-//! Trousseau de clés : chiffrement des valeurs + index aveugle de déduplication.
+//! Trousseau de clés (chiffrement versionné + blind index) et **KeyProvider**.
 //!
 //! - **Chiffrement** : chaque blob est `key_id(4, big-endian) || nonce(12) || ciphertext`.
-//!   Le `key_id` rend le blob auto-descriptif → la rotation de clé (Phase 4) pourra
-//!   ajouter de nouvelles versions sans rendre les anciens blobs indéchiffrables.
-//! - **Blind index** : `HMAC-SHA256(index_key, tenant \0 type \0 valeur)`. Permet de
-//!   dédupliquer (même valeur => même jeton) **sans stocker la valeur en clair**, et
-//!   le `tenant` dans l'entrée empêche toute corrélation entre tenants.
+//!   Le `key_id` rend le blob auto-descriptif → la rotation ajoute de nouvelles
+//!   versions de clé sans rendre les anciens blobs indéchiffrables.
+//! - **Blind index** : `HMAC-SHA256(index_key, tenant \0 type \0 valeur)`. Déduplique
+//!   sans stocker la valeur en clair ; le `tenant` empêche la corrélation entre tenants.
+//!   La clé d'index doit rester **stable** au travers des rotations (sinon la
+//!   déduplication casse), donc elle est séparée des clés de chiffrement.
 //!
-//! Phase 1 : une seule clé (id 1) issue de `MASTER_KEY` ; `index_key` dérivée de la
-//! clé maître par HMAC (domaine séparé). Phase 4 remplacera ça par un `KeyProvider`
-//! (Vault/KMS) avec vraie rotation et `index_key` stable indépendante.
+//! Le [`KeyProvider`] charge le trousseau. Aujourd'hui [`EnvKeyProvider`] (clés
+//! versionnées dans l'environnement) ; un `VaultKeyProvider` (HashiCorp Vault / KMS)
+//! implémentera le même trait sans rien changer ailleurs.
 
 use crate::crypto::Cipher;
+use async_trait::async_trait;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use thiserror::Error;
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// Erreurs de chargement / format de clé.
+#[derive(Debug, Error)]
+pub enum KeyError {
+    #[error("clé non hexadécimale")]
+    NotHex,
+    #[error("clé de {0} octets au lieu de 32")]
+    WrongLength(usize),
+    #[error("configuration de clé invalide : {0}")]
+    Invalid(String),
+}
+
+/// Trousseau : plusieurs versions de clé de chiffrement (pour la rotation) +
+/// une clé d'index stable.
 pub struct Keyring {
     current_id: u32,
     ciphers: HashMap<u32, Cipher>,
@@ -25,7 +41,17 @@ pub struct Keyring {
 }
 
 impl Keyring {
-    /// Construit le trousseau à partir d'une clé maître 32 octets (clé courante = id 1).
+    /// Construit un trousseau explicite (utilisé par les fournisseurs de clés).
+    pub fn new(ciphers: HashMap<u32, Cipher>, current_id: u32, index_key: [u8; 32]) -> Self {
+        Keyring {
+            current_id,
+            ciphers,
+            index_key,
+        }
+    }
+
+    /// Trousseau à clé unique (id 1) issu d'une clé maître ; `index_key` dérivée
+    /// de la clé maître (domaine séparé). Pratique pour le dev / la rétro-compat.
     pub fn from_master(master: &[u8; 32]) -> Self {
         let mut ciphers = HashMap::new();
         ciphers.insert(1u32, Cipher::new(master));
@@ -36,9 +62,8 @@ impl Keyring {
         }
     }
 
-    /// Chiffre une valeur avec la clé courante. Renvoie `key_id || nonce || ciphertext`.
+    /// Chiffre avec la clé courante. Renvoie `key_id || nonce || ciphertext`.
     pub fn encrypt(&self, plaintext: &str) -> Vec<u8> {
-        // `current_id` pointe toujours sur un cipher présent (invariant du constructeur).
         let body = self
             .ciphers
             .get(&self.current_id)
@@ -49,8 +74,8 @@ impl Keyring {
         out
     }
 
-    /// Déchiffre un blob `key_id || nonce || ciphertext`. `None` si la clé est
-    /// inconnue ou si l'authentification GCM échoue (intégrité compromise).
+    /// Déchiffre un blob `key_id || nonce || ciphertext`. `None` si la version de
+    /// clé est inconnue (clé retirée) ou si l'authentification GCM échoue.
     pub fn decrypt(&self, blob: &[u8]) -> Option<String> {
         if blob.len() < 4 {
             return None;
@@ -62,7 +87,6 @@ impl Keyring {
 
     /// Index aveugle d'une valeur, scopé par tenant + type (déduplication sans clair).
     pub fn blind_index(&self, tenant: &str, typ: &str, value: &str) -> String {
-        // HMAC accepte une clé de n'importe quelle taille → `new_from_slice` est infaillible ici.
         let mut mac = HmacSha256::new_from_slice(&self.index_key)
             .expect("HMAC accepte une clé de 32 octets");
         mac.update(tenant.as_bytes());
@@ -74,16 +98,114 @@ impl Keyring {
     }
 }
 
-/// Dérive une clé d'index dédiée à partir de la clé maître (domaine séparé) pour ne
-/// pas réutiliser la clé de chiffrement comme clé HMAC.
-fn derive_index_key(master: &[u8; 32]) -> [u8; 32] {
+/// Dérive une clé d'index dédiée à partir d'une clé de chiffrement (domaine séparé).
+fn derive_index_key(anchor: &[u8; 32]) -> [u8; 32] {
     let mut mac =
-        HmacSha256::new_from_slice(master).expect("HMAC accepte une clé de 32 octets");
+        HmacSha256::new_from_slice(anchor).expect("HMAC accepte une clé de 32 octets");
     mac.update(b"pseudo-gateway/blind-index/v1");
     let out = mac.finalize().into_bytes();
     let mut key = [0u8; 32];
     key.copy_from_slice(&out[..32]);
     key
+}
+
+// ─── Fournisseur de clés ──────────────────────────────────────────────────────
+
+/// Source du trousseau de clés. Abstraction pour brancher plus tard un KMS / Vault.
+#[async_trait]
+pub trait KeyProvider: Send + Sync {
+    async fn load(&self) -> Result<Keyring, KeyError>;
+}
+
+/// Charge les clés depuis l'environnement.
+///
+/// **Mode versionné (prod)** : une ou plusieurs `PSEUDO_KEY_<id>` (32 octets hex).
+///   - `PSEUDO_CURRENT_KEY_ID` : version utilisée pour chiffrer (défaut = la plus grande).
+///   - Les autres versions restent chargées pour déchiffrer les anciens blobs.
+///   - `PSEUDO_INDEX_KEY` (hex) : clé d'index **stable** ; si absente, dérivée de la
+///     plus petite `PSEUDO_KEY_<id>` (rester stable tant que cette clé existe).
+///
+/// **Repli (dev / rétro-compat)** : `MASTER_KEY` unique ; à défaut, clé éphémère.
+pub struct EnvKeyProvider;
+
+#[async_trait]
+impl KeyProvider for EnvKeyProvider {
+    async fn load(&self) -> Result<Keyring, KeyError> {
+        load_from_env()
+    }
+}
+
+fn parse_hex32(hex_str: &str) -> Result<[u8; 32], KeyError> {
+    let bytes = hex::decode(hex_str.trim()).map_err(|_| KeyError::NotHex)?;
+    if bytes.len() != 32 {
+        return Err(KeyError::WrongLength(bytes.len()));
+    }
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&bytes);
+    Ok(key)
+}
+
+fn load_from_env() -> Result<Keyring, KeyError> {
+    // BTreeMap : ordonné par id (utile pour « plus petite » / « plus grande » version).
+    let mut raw: BTreeMap<u32, [u8; 32]> = BTreeMap::new();
+    for (name, value) in std::env::vars() {
+        if let Some(suffix) = name.strip_prefix("PSEUDO_KEY_") {
+            if let Ok(id) = suffix.parse::<u32>() {
+                raw.insert(id, parse_hex32(&value)?);
+            }
+        }
+    }
+
+    if !raw.is_empty() {
+        // Version courante = explicite, sinon la plus grande disponible.
+        let current_id = match std::env::var("PSEUDO_CURRENT_KEY_ID") {
+            Ok(s) => s
+                .trim()
+                .parse::<u32>()
+                .map_err(|_| KeyError::Invalid("PSEUDO_CURRENT_KEY_ID non numérique".into()))?,
+            Err(_) => *raw.keys().next_back().expect("raw non vide"),
+        };
+        if !raw.contains_key(&current_id) {
+            return Err(KeyError::Invalid(format!(
+                "PSEUDO_CURRENT_KEY_ID={current_id} sans PSEUDO_KEY_{current_id}"
+            )));
+        }
+
+        let index_key = match std::env::var("PSEUDO_INDEX_KEY") {
+            Ok(h) => parse_hex32(&h)?,
+            Err(_) => {
+                let anchor_id = *raw.keys().next().expect("raw non vide");
+                tracing::warn!(
+                    "PSEUDO_INDEX_KEY absente — dérivée de PSEUDO_KEY_{anchor_id} \
+                     (stable tant que cette clé reste présente)"
+                );
+                derive_index_key(raw.values().next().expect("raw non vide"))
+            }
+        };
+
+        let ciphers: HashMap<u32, Cipher> =
+            raw.iter().map(|(id, k)| (*id, Cipher::new(k))).collect();
+        tracing::info!(
+            versions = ciphers.len(),
+            %current_id,
+            "trousseau versionné chargé (rotation supportée)"
+        );
+        return Ok(Keyring::new(ciphers, current_id, index_key));
+    }
+
+    // Repli : clé unique MASTER_KEY, ou clé de DEV éphémère.
+    match std::env::var("MASTER_KEY") {
+        Ok(h) => Ok(Keyring::from_master(&parse_hex32(&h)?)),
+        Err(_) => {
+            tracing::warn!(
+                "aucune clé configurée (PSEUDO_KEY_* / MASTER_KEY) — clé de DEV éphémère, NON sûre"
+            );
+            use rand::RngCore;
+            let mut k = [0u8; 32];
+            rand::rngs::OsRng.fill_bytes(&mut k);
+            Ok(Keyring::from_master(&k))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -107,5 +229,48 @@ mod tests {
         assert_eq!(kr.decrypt(&blob).as_deref(), Some("Hélène €"));
         assert!(kr.decrypt(b"xx").is_none(), "blob trop court => None");
         assert_eq!(&blob[..4], &1u32.to_be_bytes(), "key_id en tête du blob");
+    }
+
+    #[test]
+    fn rotation_les_anciens_blobs_restent_dechiffrables() {
+        let index_key = [9u8; 32];
+
+        // État initial : une seule clé (id 1).
+        let mut c1 = HashMap::new();
+        c1.insert(1u32, Cipher::new(&[1u8; 32]));
+        let kr1 = Keyring::new(c1, 1, index_key);
+        let blob_v1 = kr1.encrypt("secret-v1");
+        assert_eq!(&blob_v1[..4], &1u32.to_be_bytes());
+
+        // Rotation : on ajoute la clé 2 et on la rend courante (la clé 1 reste chargée).
+        let mut c2 = HashMap::new();
+        c2.insert(1u32, Cipher::new(&[1u8; 32]));
+        c2.insert(2u32, Cipher::new(&[2u8; 32]));
+        let kr2 = Keyring::new(c2, 2, index_key);
+
+        // Ancien blob (chiffré v1) toujours déchiffrable.
+        assert_eq!(kr2.decrypt(&blob_v1).as_deref(), Some("secret-v1"));
+        // Nouveau chiffrement utilise la clé 2.
+        let blob_v2 = kr2.encrypt("secret-v2");
+        assert_eq!(&blob_v2[..4], &2u32.to_be_bytes());
+        assert_eq!(kr2.decrypt(&blob_v2).as_deref(), Some("secret-v2"));
+        // L'index reste stable au travers de la rotation (déduplication intacte).
+        assert_eq!(
+            kr1.blind_index("t", "EMAIL", "a@b.fr"),
+            kr2.blind_index("t", "EMAIL", "a@b.fr")
+        );
+
+        // Un trousseau SANS la clé 2 ne peut pas déchiffrer un blob v2.
+        let mut only1 = HashMap::new();
+        only1.insert(1u32, Cipher::new(&[1u8; 32]));
+        let kr_only1 = Keyring::new(only1, 1, index_key);
+        assert!(kr_only1.decrypt(&blob_v2).is_none());
+    }
+
+    #[test]
+    fn parse_hex32_valide_et_invalide() {
+        assert!(parse_hex32(&"ab".repeat(32)).is_ok());
+        assert!(matches!(parse_hex32("zz"), Err(KeyError::NotHex)));
+        assert!(matches!(parse_hex32("abcd"), Err(KeyError::WrongLength(2))));
     }
 }

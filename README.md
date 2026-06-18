@@ -133,11 +133,16 @@ le modèle français, voir `integrations/ner/`).
 
 ## Schéma de clés
 
-- Clé maître AES-256 = 32 octets, fournie via `MASTER_KEY` (hex).
+- Clés AES-256 = 32 octets hex. Mode versionné `PSEUDO_KEY_<id>` (rotation), ou
+  `MASTER_KEY` unique en repli ; chargées par un `KeyProvider` (Env → Vault/KMS demain).
 - Un **nonce de 96 bits neuf par valeur** chiffrée (jamais réutilisé).
-- Blob stocké = `nonce(12) || ciphertext` ; GCM garantit aussi l'intégrité.
-- Production : clé dans **Vault / KMS**, rotation périodique, coffre dans un store
-  persistant chiffré (Redis/Postgres) plutôt qu'en mémoire.
+- Blob stocké = `key_id(4) || nonce(12) || ciphertext` ; le `key_id` rend le blob
+  auto-descriptif (rotation sans réchiffrement) et GCM garantit l'intégrité.
+- **Rotation** : ajouter `PSEUDO_KEY_<n+1>`, passer `PSEUDO_CURRENT_KEY_ID=<n+1>`,
+  redémarrer. Les nouveaux blobs utilisent la nouvelle clé ; les anciens restent
+  déchiffrables tant que leur version est présente. La clé d'index (`PSEUDO_INDEX_KEY`)
+  reste **stable** sinon la déduplication casse.
+- Coffre persistant chiffré : **Redis** (`VAULT_STORE=redis`), Postgres possible plus tard.
 
 ## Intégration Spring AI
 
@@ -182,8 +187,16 @@ de jeton atomique via script Lua, clés namespacées `pg:{tenant}:…`). Le jeto
 alors aux redémarrages → `[PERSON_1]` reste stable entre l'ingestion et les requêtes.
 Défaut `memory` (non persistant) pour le dev/tests.
 
-Feuille de route restante : `KeyProvider` Vault/KMS + rotation (Phase 4),
-remplacement par spans (Phase 5). Voir `PROMPT_CLAUDE_CODE.md`.
+**Clés & rotation** : chargées par un `KeyProvider` (aujourd'hui `EnvKeyProvider`,
+demain Vault/KMS — même trait). Plusieurs versions `PSEUDO_KEY_<id>` cohabitent :
+`PSEUDO_CURRENT_KEY_ID` chiffre, les anciennes versions déchiffrent toujours les
+anciens blobs (cf. « Schéma de clés »). La clé d'index reste stable (déduplication
+intacte au travers des rotations).
+
+**Détection par spans** : la jetonisation collecte toutes les correspondances
+(termes + regex) sur le texte d'origine, résout les chevauchements (« la plus longue
+gagne ») puis insère les jetons par plage — fiable sur les sous-chaînes imbriquées
+(« Marie » vs « Marie Dupont »), sans dépendre de l'ordre de remplacement.
 
 ## Fichiers
 

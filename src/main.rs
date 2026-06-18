@@ -23,7 +23,7 @@ use axum::{
     Json, Router,
 };
 use error::AppError;
-use keys::Keyring;
+use keys::{EnvKeyProvider, KeyProvider};
 use pseudonymize::{CustomTerm, Vault};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -135,30 +135,6 @@ async fn depseudonymize_handler(
     Ok(Json(DepseudoResp { text }))
 }
 
-/// Charge la clé maître depuis MASTER_KEY (64 caractères hex = 32 octets).
-/// En l'absence de variable, génère une clé de DEV éphémère (non persistante).
-/// Échec volontaire au démarrage si la clé est mal formée (fail-fast).
-fn load_key() -> [u8; 32] {
-    match std::env::var("MASTER_KEY") {
-        Ok(hexkey) => {
-            let bytes = hex::decode(hexkey.trim()).expect("MASTER_KEY doit être en hexadécimal");
-            assert_eq!(bytes.len(), 32, "MASTER_KEY doit faire 32 octets (64 hex)");
-            let mut k = [0u8; 32];
-            k.copy_from_slice(&bytes);
-            k
-        }
-        Err(_) => {
-            tracing::warn!(
-                "MASTER_KEY absente — clé de DEV générée (éphémère, NON sûre pour la prod)."
-            );
-            use rand::RngCore;
-            let mut k = [0u8; 32];
-            rand::rngs::OsRng.fill_bytes(&mut k);
-            k
-        }
-    }
-}
-
 #[tokio::main]
 async fn main() {
     // Logs structurés ; niveau pilotable par RUST_LOG (défaut info).
@@ -169,8 +145,14 @@ async fn main() {
         )
         .init();
 
-    let key = load_key();
-    let keyring = Keyring::from_master(&key);
+    // Chargement des clés via le fournisseur (env versionné aujourd'hui, Vault/KMS demain).
+    let keyring = match EnvKeyProvider.load().await {
+        Ok(k) => k,
+        Err(e) => {
+            tracing::error!(error = %e, "chargement des clés impossible — arrêt");
+            std::process::exit(1);
+        }
+    };
 
     // Choix du backend de coffre : VAULT_STORE=redis pour la persistance, sinon mémoire.
     let store: Arc<dyn VaultStore> = match std::env::var("VAULT_STORE").as_deref() {

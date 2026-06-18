@@ -41,6 +41,14 @@ static PATTERNS: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
 /// Reconnaît un jeton `[TYPE_N]` lors du dé-jetonnage.
 static TOKEN_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[([A-Z]+_\d+)\]").unwrap());
 
+/// Une correspondance détectée dans le texte : plage d'octets + type + valeur.
+struct Hit {
+    start: usize,
+    end: usize,
+    typ: String,
+    value: String,
+}
+
 /// Coffre logique : détient les clés (chiffrement + blind index) et délègue la
 /// persistance à un [`VaultStore`] interchangeable (mémoire, Redis, …).
 pub struct Vault {
@@ -76,34 +84,70 @@ impl Vault {
         text: &str,
         custom: &[CustomTerm],
     ) -> Result<(String, Vec<String>), VaultError> {
-        let mut out = text.to_string();
-        let mut tokens = Vec::new();
-
-        // 1) Termes nommés fournis (noms, organisations) — les plus longs d'abord
-        //    pour éviter qu'un terme court masque un terme englobant.
-        let mut sorted: Vec<&CustomTerm> = custom.iter().collect();
-        sorted.sort_by_key(|t| std::cmp::Reverse(t.value.len()));
-        for t in sorted {
-            if !t.value.is_empty() && out.contains(&t.value) {
-                let tok = self.token_for(tenant, &t.typ, &t.value).await?;
-                out = out.replace(&t.value, &format!("[{tok}]"));
-                tokens.push(tok);
+        // 1) Collecte de TOUTES les correspondances sur le texte d'origine
+        //    (termes fournis + regex), avec leurs plages d'octets. On ne mute pas
+        //    le texte pendant la détection (fini les collisions de sous-chaînes /
+        //    l'ordre de remplacement sensible de l'ancien `out.replace`).
+        let mut hits: Vec<Hit> = Vec::new();
+        for t in custom {
+            if t.value.is_empty() {
+                continue;
+            }
+            for (start, sub) in text.match_indices(t.value.as_str()) {
+                hits.push(Hit {
+                    start,
+                    end: start + sub.len(),
+                    typ: t.typ.clone(),
+                    value: t.value.clone(),
+                });
             }
         }
-
-        // 2) Données à format strict, par regex.
         for (typ, rx) in PATTERNS.iter() {
-            let found: Vec<String> = rx.find_iter(&out).map(|m| m.as_str().to_string()).collect();
-            let mut seen = HashSet::new();
-            for value in found {
-                if !seen.insert(value.clone()) {
-                    continue;
-                }
-                let tok = self.token_for(tenant, typ, &value).await?;
-                out = out.replace(&value, &format!("[{tok}]"));
-                tokens.push(tok);
+            for m in rx.find_iter(text) {
+                hits.push(Hit {
+                    start: m.start(),
+                    end: m.end(),
+                    typ: (*typ).to_string(),
+                    value: m.as_str().to_string(),
+                });
             }
         }
+
+        // 2) Résolution des chevauchements : « la plus longue gagne ». On retient
+        //    d'abord les correspondances les plus longues ; toute correspondance
+        //    qui en chevauche une déjà retenue est écartée (ex. « Marie » est
+        //    écarté au profit de « Marie Dupont »).
+        hits.sort_by(|a, b| {
+            (b.end - b.start)
+                .cmp(&(a.end - a.start))
+                .then(a.start.cmp(&b.start))
+        });
+        let mut selected: Vec<Hit> = Vec::new();
+        for h in hits {
+            let overlaps = selected.iter().any(|s| h.start < s.end && s.start < h.end);
+            if !overlaps {
+                selected.push(h);
+            }
+        }
+
+        // 3) Découpage dans l'ordre du texte : on insère chaque jeton par plage.
+        selected.sort_by_key(|h| h.start);
+        let mut out = String::with_capacity(text.len());
+        let mut tokens = Vec::new();
+        let mut seen = HashSet::new();
+        let mut cursor = 0usize;
+        for h in &selected {
+            out.push_str(&text[cursor..h.start]);
+            let tok = self.token_for(tenant, &h.typ, &h.value).await?;
+            out.push('[');
+            out.push_str(&tok);
+            out.push(']');
+            if seen.insert(tok.clone()) {
+                tokens.push(tok);
+            }
+            cursor = h.end;
+        }
+        out.push_str(&text[cursor..]);
 
         Ok((out, tokens))
     }
@@ -173,6 +217,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(clean, "[EMAIL_1] puis encore [EMAIL_1]");
+    }
+
+    #[tokio::test]
+    async fn chevauchement_la_plus_longue_gagne() {
+        let v = vault();
+        // « Marie » est inclus dans « Marie Dupont » : seul le plus long est jetonné,
+        // pas de « [PERSON_x] Dupont » bancal.
+        let terms = vec![
+            CustomTerm { typ: "PERSON".into(), value: "Marie".into() },
+            CustomTerm { typ: "PERSON".into(), value: "Marie Dupont".into() },
+        ];
+        let (clean, tokens) = v
+            .pseudonymize("_global", "Marie Dupont arrive demain", &terms)
+            .await
+            .unwrap();
+        assert_eq!(clean, "[PERSON_1] arrive demain");
+        assert_eq!(tokens, vec!["PERSON_1".to_string()]);
     }
 
     #[tokio::test]
