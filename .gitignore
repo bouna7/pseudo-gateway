@@ -1,0 +1,11 @@
+# Artefacts de compilation Rust
+/target
+
+# Secrets locaux (la clé maître, etc.) — .env.example reste versionné
+.env
+
+# Fichiers OS / éditeurs
+.DS_Store
+*.swp
+.idea/
+.vscode/

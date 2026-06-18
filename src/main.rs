@@ -1,0 +1,192 @@
+//! Passerelle de pseudonymisation chiffrée.
+//!
+//! Deux endpoints HTTP :
+//!   POST /pseudonymize   { text, custom_terms?, tenant_id? } -> { text, tokens }
+//!   POST /depseudonymize { text, tenant_id? }                -> { text }
+//!   GET  /health                                             -> "ok"
+//!
+//! Le coffre (jeton <-> valeur réelle chiffrée AES-256-GCM) est désormais derrière
+//! le trait `VaultStore`. Phase 1 : `InMemoryVaultStore` (perdu au redémarrage).
+//! Phase 2 : `RedisVaultStore` persistant, sélectionnable par configuration.
+
+mod crypto;
+mod error;
+mod keys;
+mod ner;
+mod pseudonymize;
+mod store;
+
+use axum::{
+    extract::State,
+    response::Html,
+    routing::{get, post},
+    Json, Router,
+};
+use error::AppError;
+use keys::Keyring;
+use pseudonymize::{CustomTerm, Vault};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use store::{InMemoryVaultStore, VaultStore};
+
+/// Espace de jetons par défaut quand l'appelant ne fournit pas de `tenant_id`
+/// (rétro-compatibilité avec l'API d'origine).
+const DEFAULT_TENANT: &str = "_global";
+
+#[derive(Clone)]
+struct AppState {
+    vault: Arc<Vault>,
+}
+
+#[derive(Deserialize)]
+struct CustomTermDto {
+    #[serde(rename = "type")]
+    typ: String,
+    value: String,
+}
+
+#[derive(Deserialize)]
+struct PseudoReq {
+    text: String,
+    #[serde(default)]
+    custom_terms: Vec<CustomTermDto>,
+    /// Espace de jetons (isolation par client/document). Optionnel.
+    #[serde(default)]
+    tenant_id: Option<String>,
+}
+
+#[derive(Serialize)]
+struct PseudoResp {
+    text: String,
+    tokens: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct DepseudoReq {
+    text: String,
+    #[serde(default)]
+    tenant_id: Option<String>,
+}
+
+#[derive(Serialize)]
+struct DepseudoResp {
+    text: String,
+}
+
+async fn index() -> Html<&'static str> {
+    Html(
+        "<h1>Passerelle de pseudonymisation</h1>\
+         <p>Le service fonctionne. Les endpoints sont en <b>POST</b> :</p>\
+         <ul>\
+           <li><code>POST /pseudonymize</code> — jetonne + chiffre</li>\
+           <li><code>POST /depseudonymize</code> — restitue les valeurs réelles</li>\
+           <li><code>GET /health</code> — sonde de disponibilité</li>\
+         </ul>\
+         <p>Testez avec <code>curl</code> ou <code>./test.sh</code> (un navigateur ne peut pas faire de POST).</p>",
+    )
+}
+
+/// Sonde de disponibilité (utilisée par Dokploy / load balancer).
+async fn health() -> &'static str {
+    "ok"
+}
+
+async fn pseudonymize_handler(
+    State(st): State<AppState>,
+    Json(req): Json<PseudoReq>,
+) -> Result<Json<PseudoResp>, AppError> {
+    let tenant = req.tenant_id.as_deref().unwrap_or(DEFAULT_TENANT);
+
+    // 1) Termes fournis manuellement par l'appelant.
+    let mut terms: Vec<CustomTerm> = req
+        .custom_terms
+        .into_iter()
+        .map(|c| CustomTerm {
+            typ: c.typ,
+            value: c.value,
+        })
+        .collect();
+
+    // 2) Détection automatique (NER) via Presidio. Best effort : si le service est
+    //    indisponible, on continue avec la regex + les termes manuels.
+    match ner::analyze(&req.text).await {
+        Ok(entities) => {
+            for (typ, value) in ner::to_terms(&req.text, &entities) {
+                terms.push(CustomTerm { typ, value });
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "NER (Presidio) indisponible — repli regex + termes manuels"),
+    }
+
+    // 3) Jetonnage + chiffrement (la synchronisation vit dans le store).
+    let (text, tokens) = st.vault.pseudonymize(tenant, &req.text, &terms).await?;
+    tracing::info!(%tenant, tokens = tokens.len(), "pseudonymisation effectuée");
+    Ok(Json(PseudoResp { text, tokens }))
+}
+
+async fn depseudonymize_handler(
+    State(st): State<AppState>,
+    Json(req): Json<DepseudoReq>,
+) -> Result<Json<DepseudoResp>, AppError> {
+    let tenant = req.tenant_id.as_deref().unwrap_or(DEFAULT_TENANT);
+    let text = st.vault.depseudonymize(tenant, &req.text).await?;
+    Ok(Json(DepseudoResp { text }))
+}
+
+/// Charge la clé maître depuis MASTER_KEY (64 caractères hex = 32 octets).
+/// En l'absence de variable, génère une clé de DEV éphémère (non persistante).
+/// Échec volontaire au démarrage si la clé est mal formée (fail-fast).
+fn load_key() -> [u8; 32] {
+    match std::env::var("MASTER_KEY") {
+        Ok(hexkey) => {
+            let bytes = hex::decode(hexkey.trim()).expect("MASTER_KEY doit être en hexadécimal");
+            assert_eq!(bytes.len(), 32, "MASTER_KEY doit faire 32 octets (64 hex)");
+            let mut k = [0u8; 32];
+            k.copy_from_slice(&bytes);
+            k
+        }
+        Err(_) => {
+            tracing::warn!(
+                "MASTER_KEY absente — clé de DEV générée (éphémère, NON sûre pour la prod)."
+            );
+            use rand::RngCore;
+            let mut k = [0u8; 32];
+            rand::rngs::OsRng.fill_bytes(&mut k);
+            k
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    // Logs structurés ; niveau pilotable par RUST_LOG (défaut info).
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
+    let key = load_key();
+    let keyring = Keyring::from_master(&key);
+    let store: Arc<dyn VaultStore> = Arc::new(InMemoryVaultStore::new());
+    let state = AppState {
+        vault: Arc::new(Vault::new(keyring, store)),
+    };
+
+    let app = Router::new()
+        .route("/", get(index))
+        .route("/health", get(health))
+        .route("/pseudonymize", post(pseudonymize_handler))
+        .route("/depseudonymize", post(depseudonymize_handler))
+        .with_state(state);
+
+    let addr = "0.0.0.0:8080";
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .expect("impossible de se lier au port 8080");
+    tracing::info!("Passerelle de pseudonymisation prête sur http://{addr}");
+    axum::serve(listener, app)
+        .await
+        .expect("le serveur axum s'est arrêté");
+}

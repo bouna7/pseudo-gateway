@@ -1,0 +1,22 @@
+# Service NER Microsoft Presidio (analyzer), à lancer dans VOTRE périmètre.
+# Il détecte automatiquement PERSON, ORG (NRP), LOCATION, etc. — ce que la regex
+# seule ne sait pas faire. Le texte en clair va à Presidio, mais Presidio est
+# auto-hébergé chez vous : aucune perte de confidentialité vis-à-vis du cloud.
+#
+#   docker compose up -d
+#   curl -X POST http://localhost:5002/analyze \
+#     -H "Content-Type: application/json" \
+#     -d '{"text":"JohnTech signe avec Marie Dupont","language":"en"}'
+#
+# Pour le FRANÇAIS : l'image par défaut embarque le modèle anglais. Pour le
+# français il faut une image construite avec le modèle spaCy fr_core_news_lg
+# (voir la doc Presidio « Customizing the NLP engine »). En attendant, vous
+# pouvez analyser en "language":"en" (résultats partiels) ou garder les
+# custom_terms pour les noms FR.
+
+services:
+  presidio-analyzer:
+    image: mcr.microsoft.com/presidio-analyzer:latest
+    ports:
+      - "5002:3000"
+    restart: unless-stopped
