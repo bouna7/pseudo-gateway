@@ -145,12 +145,25 @@ fn parse_hex32(hex_str: &str) -> Result<[u8; 32], KeyError> {
     Ok(key)
 }
 
+/// Lit une variable d'environnement en traitant « absente » ET « vide / espaces »
+/// de la même façon (None). Évite qu'un `${VAR:-}` de docker-compose, qui injecte
+/// une chaîne vide, soit pris pour une valeur fournie.
+fn env_opt(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 fn load_from_env() -> Result<Keyring, KeyError> {
     // BTreeMap : ordonné par id (utile pour « plus petite » / « plus grande » version).
     let mut raw: BTreeMap<u32, [u8; 32]> = BTreeMap::new();
     for (name, value) in std::env::vars() {
         if let Some(suffix) = name.strip_prefix("PSEUDO_KEY_") {
             if let Ok(id) = suffix.parse::<u32>() {
+                if value.trim().is_empty() {
+                    continue; // variable injectée vide (ex. ${PSEUDO_KEY_2:-}) → ignorée
+                }
                 raw.insert(id, parse_hex32(&value)?);
             }
         }
@@ -158,12 +171,11 @@ fn load_from_env() -> Result<Keyring, KeyError> {
 
     if !raw.is_empty() {
         // Version courante = explicite, sinon la plus grande disponible.
-        let current_id = match std::env::var("PSEUDO_CURRENT_KEY_ID") {
-            Ok(s) => s
-                .trim()
+        let current_id = match env_opt("PSEUDO_CURRENT_KEY_ID") {
+            Some(s) => s
                 .parse::<u32>()
                 .map_err(|_| KeyError::Invalid("PSEUDO_CURRENT_KEY_ID non numérique".into()))?,
-            Err(_) => *raw.keys().next_back().expect("raw non vide"),
+            None => *raw.keys().next_back().expect("raw non vide"),
         };
         if !raw.contains_key(&current_id) {
             return Err(KeyError::Invalid(format!(
@@ -171,9 +183,9 @@ fn load_from_env() -> Result<Keyring, KeyError> {
             )));
         }
 
-        let index_key = match std::env::var("PSEUDO_INDEX_KEY") {
-            Ok(h) => parse_hex32(&h)?,
-            Err(_) => {
+        let index_key = match env_opt("PSEUDO_INDEX_KEY") {
+            Some(h) => parse_hex32(&h)?,
+            None => {
                 let anchor_id = *raw.keys().next().expect("raw non vide");
                 tracing::warn!(
                     "PSEUDO_INDEX_KEY absente — dérivée de PSEUDO_KEY_{anchor_id} \
@@ -194,9 +206,9 @@ fn load_from_env() -> Result<Keyring, KeyError> {
     }
 
     // Repli : clé unique MASTER_KEY, ou clé de DEV éphémère.
-    match std::env::var("MASTER_KEY") {
-        Ok(h) => Ok(Keyring::from_master(&parse_hex32(&h)?)),
-        Err(_) => {
+    match env_opt("MASTER_KEY") {
+        Some(h) => Ok(Keyring::from_master(&parse_hex32(&h)?)),
+        None => {
             tracing::warn!(
                 "aucune clé configurée (PSEUDO_KEY_* / MASTER_KEY) — clé de DEV éphémère, NON sûre"
             );
