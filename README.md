@@ -144,6 +144,38 @@ le modèle français, voir `integrations/ner/`).
   reste **stable** sinon la déduplication casse.
 - Coffre persistant chiffré : **Redis** (`VAULT_STORE=redis`), Postgres possible plus tard.
 
+## Déploiement (Docker / Dokploy)
+
+Image construite par le `Dockerfile` (build Rust release multi-stage → image
+`debian-slim` **non-root**, port 8080).
+
+```bash
+docker build -t pseudo-gateway .
+docker run -p 8080:8080 \
+  -e VAULT_STORE=redis -e REDIS_URL=redis://redis:6379 \
+  -e PSEUDO_KEY_1=<hex64> -e PSEUDO_INDEX_KEY=<hex64> \
+  -e GATEWAY_API_KEY=<secret> \
+  pseudo-gateway
+```
+
+### Sur Dokploy → `apirag.roostdrive.com`
+
+1. **Application** dont la source est ce dépôt (build par le `Dockerfile`).
+2. **Domaine** `apirag.roostdrive.com` → port conteneur **8080**, HTTPS. Health
+   check : `GET /health`.
+3. **Redis** : provisionner un service Redis avec persistance AOF, puis
+   `VAULT_STORE=redis` + `REDIS_URL=redis://<host>:6379`.
+4. **Secrets (variables d'env, jamais committés)** :
+   - `PSEUDO_KEY_1` (32 octets hex) — clé de chiffrement courante,
+   - `PSEUDO_INDEX_KEY` (32 octets hex) — clé d'index **stable**,
+   - `GATEWAY_API_KEY` — partagé avec `files_service` (en-tête `X-Api-Key`).
+   - Rotation : ajouter `PSEUDO_KEY_2`, passer `PSEUDO_CURRENT_KEY_ID=2`, redéployer.
+5. **CACHEBUST** : bumper l'`ARG CACHEBUST` du `Dockerfile` pour forcer un rebuild.
+
+> ⚠️ `/depseudonymize` restitue des données réelles : **ne jamais exposer la
+> passerelle sans `GATEWAY_API_KEY`** (ou la garder sur réseau privé). `/health`
+> et `/` restent ouverts pour les sondes.
+
 ## Intégration Spring AI
 
 Le plus propre : un `Advisor` Spring AI qui appelle `/pseudonymize` avant l'envoi

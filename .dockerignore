@@ -1,0 +1,7 @@
+# Artefacts de build (recompilés dans l'image) — gros et inutiles dans le contexte
+/target
+# Métadonnées git
+.git
+.gitignore
+# Secrets locaux
+.env

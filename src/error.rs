@@ -29,6 +29,9 @@ pub enum AppError {
     #[allow(dead_code)] // construit par la validation d'entrée (phases suivantes)
     #[error("requête invalide : {0}")]
     BadRequest(String),
+    /// Clé d'API manquante ou invalide (endpoint protégé).
+    #[error("clé d'API manquante ou invalide")]
+    Unauthorized,
     /// Erreur interne du coffre.
     #[error(transparent)]
     Vault(#[from] VaultError),
@@ -38,6 +41,7 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, code) = match &self {
             AppError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
+            AppError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
             AppError::Vault(_) => (StatusCode::INTERNAL_SERVER_ERROR, "vault_error"),
         };
         // On logge le message technique, jamais une valeur en clair.

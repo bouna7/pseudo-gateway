@@ -21,5 +21,23 @@ services:
       timeout: 3s
       retries: 5
 
+  # Passerelle (build local depuis le Dockerfile). Pour un test full-stack :
+  #   MASTER_KEY=$(openssl rand -hex 32) docker compose up --build
+  # En prod (Dokploy), on déploie l'image construite par le Dockerfile, pas ce service.
+  gateway:
+    build: .
+    environment:
+      VAULT_STORE: redis
+      REDIS_URL: redis://redis:6379
+      MASTER_KEY: ${MASTER_KEY:-}
+      GATEWAY_API_KEY: ${GATEWAY_API_KEY:-}
+      RUST_LOG: info
+    ports:
+      - "8080:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   pseudo-redis-data:
