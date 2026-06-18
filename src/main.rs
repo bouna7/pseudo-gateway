@@ -27,7 +27,7 @@ use keys::Keyring;
 use pseudonymize::{CustomTerm, Vault};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use store::{InMemoryVaultStore, VaultStore};
+use store::{InMemoryVaultStore, RedisVaultStore, VaultStore};
 
 /// Espace de jetons par défaut quand l'appelant ne fournit pas de `tenant_id`
 /// (rétro-compatibilité avec l'API d'origine).
@@ -86,9 +86,11 @@ async fn index() -> Html<&'static str> {
     )
 }
 
-/// Sonde de disponibilité (utilisée par Dokploy / load balancer).
-async fn health() -> &'static str {
-    "ok"
+/// Sonde de disponibilité (utilisée par Dokploy / load balancer). Vérifie aussi
+/// l'accès au store (PING Redis) → 503 si le backend est injoignable.
+async fn health(State(st): State<AppState>) -> Result<&'static str, AppError> {
+    st.vault.ping().await?;
+    Ok("ok")
 }
 
 async fn pseudonymize_handler(
@@ -169,7 +171,30 @@ async fn main() {
 
     let key = load_key();
     let keyring = Keyring::from_master(&key);
-    let store: Arc<dyn VaultStore> = Arc::new(InMemoryVaultStore::new());
+
+    // Choix du backend de coffre : VAULT_STORE=redis pour la persistance, sinon mémoire.
+    let store: Arc<dyn VaultStore> = match std::env::var("VAULT_STORE").as_deref() {
+        Ok("redis") => {
+            let url = std::env::var("REDIS_URL")
+                .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+            match RedisVaultStore::connect(&url).await {
+                Ok(s) => {
+                    tracing::info!(%url, "coffre Redis connecté (persistant)");
+                    Arc::new(s)
+                }
+                Err(e) => {
+                    // Fail-fast : en mode redis, on ne démarre pas sur un coffre absent.
+                    tracing::error!(error = %e, %url, "connexion Redis impossible — arrêt");
+                    std::process::exit(1);
+                }
+            }
+        }
+        _ => {
+            tracing::warn!("coffre EN MÉMOIRE (non persistant) — VAULT_STORE=redis pour la prod");
+            Arc::new(InMemoryVaultStore::new())
+        }
+    };
+
     let state = AppState {
         vault: Arc::new(Vault::new(keyring, store)),
     };

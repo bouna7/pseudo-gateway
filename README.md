@@ -39,6 +39,26 @@ cargo run
 Sans `MASTER_KEY`, une clé de DEV éphémère est générée (un avertissement
 s'affiche) — pratique pour tester, à NE PAS utiliser en production.
 
+### Avec coffre Redis (persistant)
+
+```bash
+# 1. Démarrer Redis (persistance AOF + volume)
+docker compose up -d
+
+# 2. Lancer la passerelle en mode Redis
+export MASTER_KEY=$(openssl rand -hex 32)
+export VAULT_STORE=redis
+export REDIS_URL=redis://127.0.0.1:6379
+cargo run
+
+# 3. Valider le round-trip Redis (test d'intégration, Redis requis)
+cargo test -- --ignored
+```
+
+**Preuve de persistance** : créez un jeton via `POST /pseudonymize`, arrêtez puis
+relancez le service (`cargo run`), et `POST /depseudonymize` du même jeton restitue
+toujours la valeur — la correspondance vit dans Redis, plus en mémoire.
+
 ## Tester
 
 Dans un autre terminal :
@@ -157,9 +177,13 @@ des octets chiffrés et des **index aveugles**.
 - **Robustesse** : handlers `Result<_, AppError>` (plus de `.unwrap()`), logs `tracing`
   (jamais de valeur en clair), endpoint `GET /health`.
 
-Feuille de route restante : `RedisVaultStore` persistant (Phase 2), `KeyProvider`
-Vault/KMS + rotation (Phase 4), remplacement par spans (Phase 5). Voir
-`PROMPT_CLAUDE_CODE.md`.
+**Coffre persistant** : `VAULT_STORE=redis` bascule sur `RedisVaultStore` (création
+de jeton atomique via script Lua, clés namespacées `pg:{tenant}:…`). Le jeton survit
+alors aux redémarrages → `[PERSON_1]` reste stable entre l'ingestion et les requêtes.
+Défaut `memory` (non persistant) pour le dev/tests.
+
+Feuille de route restante : `KeyProvider` Vault/KMS + rotation (Phase 4),
+remplacement par spans (Phase 5). Voir `PROMPT_CLAUDE_CODE.md`.
 
 ## Fichiers
 

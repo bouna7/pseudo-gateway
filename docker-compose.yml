@@ -1,0 +1,25 @@
+# Redis pour le coffre persistant de la passerelle (VAULT_STORE=redis).
+#
+#   docker compose up -d        # démarre Redis sur 127.0.0.1:6379
+#   VAULT_STORE=redis REDIS_URL=redis://127.0.0.1:6379 cargo run
+#
+# Persistance AOF activée + volume nommé → les jetons survivent au redémarrage
+# (du service ET de Redis). C'est ce qui rend `[PERSON_1]` stable entre
+# l'ingestion des documents et les requêtes ultérieures.
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - pseudo-redis-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  pseudo-redis-data:

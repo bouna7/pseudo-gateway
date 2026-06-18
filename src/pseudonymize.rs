@@ -53,6 +53,11 @@ impl Vault {
         Vault { keyring, store }
     }
 
+    /// Sonde la disponibilité du store sous-jacent (pour `GET /health`).
+    pub async fn ping(&self) -> Result<(), VaultError> {
+        self.store.ping().await
+    }
+
     /// Renvoie le jeton existant pour `value`, ou en crée un nouveau et chiffre la valeur.
     async fn token_for(&self, tenant: &str, typ: &str, value: &str) -> Result<String, VaultError> {
         let bi = self.keyring.blind_index(tenant, typ, value);
