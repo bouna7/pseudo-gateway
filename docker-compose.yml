@@ -1,17 +1,16 @@
-# Redis pour le coffre persistant de la passerelle (VAULT_STORE=redis).
+# Stack de la passerelle : Redis (persistant) + gateway.
 #
-#   docker compose up -d        # démarre Redis sur 127.0.0.1:6379
-#   VAULT_STORE=redis REDIS_URL=redis://127.0.0.1:6379 cargo run
+# ⚠️ Compose Dokploy : AUCUN port n'est publié sur l'hôte. Le proxy Dokploy
+# (Traefik) route le domaine vers le port INTERNE 8080 du conteneur `gateway`
+# (configuré dans l'onglet « Domains » du service Compose). Publier un port hôte
+# ici provoque « address already in use » sur le serveur Dokploy.
 #
-# Persistance AOF activée + volume nommé → les jetons survivent au redémarrage
-# (du service ET de Redis). C'est ce qui rend `[PERSON_1]` stable entre
-# l'ingestion des documents et les requêtes ultérieures.
+# Pour un test LOCAL avec ports publiés sur ta machine :
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up --build
 services:
   redis:
     image: redis:7-alpine
     command: ["redis-server", "--appendonly", "yes"]
-    ports:
-      - "127.0.0.1:6379:6379"
     volumes:
       - pseudo-redis-data:/data
     restart: unless-stopped
@@ -21,19 +20,23 @@ services:
       timeout: 3s
       retries: 5
 
-  # Passerelle (build local depuis le Dockerfile). Pour un test full-stack :
-  #   MASTER_KEY=$(openssl rand -hex 32) docker compose up --build
-  # En prod (Dokploy), on déploie l'image construite par le Dockerfile, pas ce service.
   gateway:
     build: .
     environment:
       VAULT_STORE: redis
       REDIS_URL: redis://redis:6379
+      # Secrets : à définir dans l'onglet « Environment » de Dokploy (jamais committés).
+      # Mode versionné (recommandé) :
+      PSEUDO_KEY_1: ${PSEUDO_KEY_1:-}
+      PSEUDO_CURRENT_KEY_ID: ${PSEUDO_CURRENT_KEY_ID:-}
+      PSEUDO_INDEX_KEY: ${PSEUDO_INDEX_KEY:-}
+      # Repli clé unique (si tu n'utilises pas PSEUDO_KEY_*) :
       MASTER_KEY: ${MASTER_KEY:-}
+      # Protection des endpoints sensibles (partagé avec files_service) :
       GATEWAY_API_KEY: ${GATEWAY_API_KEY:-}
       RUST_LOG: info
-    ports:
-      - "8080:8080"
+    expose:
+      - "8080"
     depends_on:
       redis:
         condition: service_healthy

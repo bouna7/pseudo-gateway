@@ -1,0 +1,13 @@
+# Surcharge pour le test LOCAL uniquement (NON utilisée par Dokploy).
+# Publie les ports sur l'hôte pour pouvoir curl depuis ta machine.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up --build
+#
+# Pense à fournir une clé : MASTER_KEY=$(openssl rand -hex 32) ... up
+services:
+  redis:
+    ports:
+      - "127.0.0.1:6379:6379"
+  gateway:
+    ports:
+      - "8080:8080"
