@@ -20,7 +20,7 @@ use axum::{
     extract::{Request, State},
     http::HeaderMap,
     middleware::{self, Next},
-    response::{Html, Response},
+    response::Response,
     routing::{get, post},
     Json, Router,
 };
@@ -96,19 +96,6 @@ struct DepseudoReq {
 #[derive(Serialize)]
 struct DepseudoResp {
     text: String,
-}
-
-async fn index() -> Html<&'static str> {
-    Html(
-        "<h1>Passerelle de pseudonymisation</h1>\
-         <p>Le service fonctionne. Les endpoints sont en <b>POST</b> :</p>\
-         <ul>\
-           <li><code>POST /pseudonymize</code> — jetonne + chiffre</li>\
-           <li><code>POST /depseudonymize</code> — restitue les valeurs réelles</li>\
-           <li><code>GET /health</code> — sonde de disponibilité</li>\
-         </ul>\
-         <p>Testez avec <code>curl</code> ou <code>./test.sh</code> (un navigateur ne peut pas faire de POST).</p>",
-    )
 }
 
 /// Sonde de disponibilité (utilisée par Dokploy / load balancer). Vérifie aussi
@@ -225,7 +212,6 @@ async fn main() {
         .route_layer(middleware::from_fn_with_state(state.clone(), require_api_key));
 
     let app = Router::new()
-        .route("/", get(index))
         .route("/health", get(health))
         .merge(protected)
         .with_state(state);
