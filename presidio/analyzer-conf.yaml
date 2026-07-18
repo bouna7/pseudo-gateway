@@ -10,10 +10,11 @@
 #   - nlp-conf.yaml       (NLP_CONF_FILE)  → modèles spaCy + mapping NER
 #   - recognizers.yaml    (RECOGNIZER_REGISTRY_CONF_FILE) → registre
 #
-# Les trois listes de langues DOIVENT être cohérentes (fr + en partout).
+# Les trois listes de langues DOIVENT être cohérentes (fr partout —
+# l'anglais a été retiré, cf. nlp-conf.yaml : 2 modèles lg dépassaient le
+# délai de boot du worker gunicorn).
 supported_languages:
   - fr
-  - en
 
 # Seuil géré par l'appelant : la passerelle envoie score_threshold=0.6 dans
 # chaque requête /analyze (src/ner.rs) — on ne filtre pas une 2e fois ici.

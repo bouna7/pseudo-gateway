@@ -14,7 +14,6 @@
 # échouer la 1re tentative inline.
 supported_languages:
   - fr
-  - en
 
 # 26 = IGNORECASE | DOTALL | MULTILINE (valeur du fichier de référence).
 global_regex_flags: 26
@@ -24,4 +23,3 @@ recognizers:
     type: predefined
     supported_languages:
       - language: fr
-      - language: en

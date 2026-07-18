@@ -38,6 +38,13 @@ services:
   presidio:
     build: ./presidio
     restart: unless-stopped
+    environment:
+      # Délai de boot/req du worker gunicorn. L'env GUNICORN_CMD_ARGS prime
+      # sur le fichier de conf de l'image. Sans marge, le chargement du modèle
+      # spaCy au boot peut dépasser le délai par défaut → worker tué/relancé
+      # en boucle : le master écoute (port ouvert) mais aucune requête n'est
+      # jamais servie — vu en prod le 2026-07-18 (timeouts gateway 45 min).
+      GUNICORN_CMD_ARGS: "--timeout 300"
     # Pas de port hôte (règle Dokploy, cf. en-tête) : joignable uniquement via
     # le réseau interne du compose, sur son port 3000.
 

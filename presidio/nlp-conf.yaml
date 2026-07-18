@@ -1,13 +1,16 @@
 # Conf du moteur NLP (NLP_CONF_FILE) — schéma de conf/default.yaml de Presidio.
 #
-# Français = langue principale (PRESIDIO_LANG=fr côté gateway) ; l'anglais
-# reste chargé en secours (documents anglophones).
+# FRANÇAIS SEUL (PRESIDIO_LANG=fr côté gateway). L'anglais a été retiré :
+# charger deux modèles « lg » (~1,1 Go cumulés) dépassait le délai de boot du
+# worker gunicorn → worker tué/relancé en boucle, port ouvert par le master
+# mais jamais servi → timeouts « error sending request » côté gateway pendant
+# 45 min. Un seul modèle divise le temps de boot et la RAM par deux. Les
+# documents anglophones sont analysés par le modèle français : il détecte
+# correctement les noms propres capitalisés, ce qui couvre l'essentiel.
 nlp_engine_name: spacy
 models:
   - lang_code: fr
     model_name: fr_core_news_lg
-  - lang_code: en
-    model_name: en_core_web_lg
 
 # Mapping EXPLICITE : les modèles spaCy français étiquettent « PER »
 # (pas « PERSON ») — sans cette entrée, les noms détectés par
@@ -23,6 +26,8 @@ ner_model_configuration:
     ORGANIZATION: ORGANIZATION
     NORP: NRP
   # MISC (spécifique aux modèles FR : nationalités, œuvres, événements…)
-  # est trop bruyant pour de la pseudonymisation — ignoré.
+  # est trop bruyant pour de la pseudonymisation — ignoré. (Vérifié en réel :
+  # JavaScript / Java Spring Boot / Angular sortent en MISC — les masquer
+  # ruinerait l'utilité RAG du document.)
   labels_to_ignore:
     - MISC
