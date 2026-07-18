@@ -29,14 +29,14 @@ services:
   # prod depuis le début (constaté le 2026-07-18 via l'aperçu confidentialité).
   #
   # La détection reste best-effort (src/ner.rs) : le gateway démarre et répond
-  # même si Presidio est down ou encore en train de charger son modèle
-  # (~30-60 s au premier démarrage). RAM ≈ 1-1,5 Go (modèle spaCy en mémoire).
+  # même si Presidio est down ou encore en train de charger ses modèles
+  # (~30-60 s au premier démarrage). RAM ≈ 2 Go (modèles FR + EN en mémoire).
   #
-  # Phase A : modèle ANGLAIS de l'image officielle — détecte déjà bien les
-  # noms de personnes capitalisés. Phase B prévue : image custom avec le
-  # modèle spaCy français (fr_core_news_lg) + PRESIDIO_LANG=fr.
+  # Image custom (./presidio) : image officielle + modèle spaCy FRANÇAIS
+  # (fr_core_news_lg) — l'officielle seule n'a que l'anglais et rate une
+  # partie des noms/villes sur les documents français.
   presidio:
-    image: mcr.microsoft.com/presidio-analyzer:latest
+    build: ./presidio
     restart: unless-stopped
     # Pas de port hôte (règle Dokploy, cf. en-tête) : joignable uniquement via
     # le réseau interne du compose, sur son port 3000.
@@ -48,7 +48,7 @@ services:
       REDIS_URL: redis://redis:6379
       # NER : le conteneur presidio ci-dessus (port interne 3000).
       PRESIDIO_URL: http://presidio:3000
-      PRESIDIO_LANG: en  # phase B : fr (exige le modèle français dans l'image)
+      PRESIDIO_LANG: fr  # modèle français fr_core_news_lg (cf. ./presidio)
       # Secrets : à définir dans l'onglet « Environment » de Dokploy (jamais committés).
       # Mode versionné (recommandé) :
       PSEUDO_KEY_1: ${PSEUDO_KEY_1:-}

@@ -1,0 +1,37 @@
+# Conf du moteur Presidio pour la passerelle de pseudonymisation.
+#
+# Français = langue principale (PRESIDIO_LANG=fr côté gateway) ; l'anglais
+# reste chargé en secours (documents anglophones, comparaisons de recette).
+#
+# Le mapping ner_model_configuration est EXPLICITE car les modèles spaCy
+# français étiquettent « PER » (pas « PERSON ») : sans ce mapping, les noms
+# détectés par fr_core_news_lg seraient ignorés par Presidio.
+supported_languages:
+  - fr
+  - en
+
+# Seuil géré par l'appelant : la passerelle envoie score_threshold=0.6 dans
+# chaque requête /analyze (src/ner.rs) — on ne filtre pas une 2e fois ici.
+default_score_threshold: 0
+
+nlp_configuration:
+  nlp_engine_name: spacy
+  models:
+    - lang_code: fr
+      model_name: fr_core_news_lg
+    - lang_code: en
+      model_name: en_core_web_lg
+  ner_model_configuration:
+    model_to_presidio_entity_mapping:
+      PER: PERSON
+      PERSON: PERSON
+      LOC: LOCATION
+      LOCATION: LOCATION
+      GPE: LOCATION
+      ORG: ORGANIZATION
+      ORGANIZATION: ORGANIZATION
+      NORP: NRP
+    # MISC (spécifique aux modèles FR : nationalités, œuvres, événements…)
+    # est trop bruyant pour de la pseudonymisation — ignoré.
+    labels_to_ignore:
+      - MISC
