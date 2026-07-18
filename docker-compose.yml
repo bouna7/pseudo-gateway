@@ -1,4 +1,4 @@
-# Stack de la passerelle : Redis (persistant) + gateway.
+# Stack de la passerelle : Redis (persistant) + Presidio (NER) + gateway.
 #
 # ⚠️ Compose Dokploy : AUCUN port n'est publié sur l'hôte. Le proxy Dokploy
 # (Traefik) route le domaine vers le port INTERNE 8080 du conteneur `gateway`
@@ -20,11 +20,35 @@ services:
       timeout: 3s
       retries: 5
 
+  # NER (noms, lieux, organisations) — Microsoft Presidio, en local sur le VPS
+  # (aucune donnée ne sort : conforme au positionnement EU/RGPD).
+  #
+  # SANS ce conteneur, la passerelle fonctionne en repli regex seul
+  # (EMAIL/PHONE/IBAN/CARD) et logue « NER (Presidio) indisponible » à chaque
+  # appel : les NOMS et VILLES partent en clair au LLM — c'était le cas en
+  # prod depuis le début (constaté le 2026-07-18 via l'aperçu confidentialité).
+  #
+  # La détection reste best-effort (src/ner.rs) : le gateway démarre et répond
+  # même si Presidio est down ou encore en train de charger son modèle
+  # (~30-60 s au premier démarrage). RAM ≈ 1-1,5 Go (modèle spaCy en mémoire).
+  #
+  # Phase A : modèle ANGLAIS de l'image officielle — détecte déjà bien les
+  # noms de personnes capitalisés. Phase B prévue : image custom avec le
+  # modèle spaCy français (fr_core_news_lg) + PRESIDIO_LANG=fr.
+  presidio:
+    image: mcr.microsoft.com/presidio-analyzer:latest
+    restart: unless-stopped
+    # Pas de port hôte (règle Dokploy, cf. en-tête) : joignable uniquement via
+    # le réseau interne du compose, sur son port 3000.
+
   gateway:
     build: .
     environment:
       VAULT_STORE: redis
       REDIS_URL: redis://redis:6379
+      # NER : le conteneur presidio ci-dessus (port interne 3000).
+      PRESIDIO_URL: http://presidio:3000
+      PRESIDIO_LANG: en  # phase B : fr (exige le modèle français dans l'image)
       # Secrets : à définir dans l'onglet « Environment » de Dokploy (jamais committés).
       # Mode versionné (recommandé) :
       PSEUDO_KEY_1: ${PSEUDO_KEY_1:-}
@@ -40,6 +64,10 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      # service_started (PAS service_healthy) : le NER est best-effort, le
+      # gateway ne doit JAMAIS être bloqué au démarrage par Presidio.
+      presidio:
+        condition: service_started
     restart: unless-stopped
 
 volumes:
