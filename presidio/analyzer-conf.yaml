@@ -35,3 +35,23 @@ nlp_configuration:
     # est trop bruyant pour de la pseudonymisation — ignoré.
     labels_to_ignore:
       - MISC
+
+# OBLIGATOIRE dès qu'on change supported_languages : sans cette section,
+# Presidio charge son registre par défaut (anglais seul) et refuse de
+# démarrer — « supported languages have to be consistent » (registry ['en']
+# vs analyzer ['fr','en']), gunicorn en crash-loop.
+#
+# On ne déclare QUE le recognizer NER spaCy (PERSON/LOC/ORG) : les motifs
+# (EMAIL/PHONE/IBAN/CARD) sont déjà détectés par les regex de la passerelle
+# elle-même (src/pseudonymize.rs) — inutile de les faire tourner deux fois,
+# et moins de faux positifs des recognizers anglais sur du texte français.
+recognizer_registry:
+  supported_languages:
+    - fr
+    - en
+  recognizers:
+    - name: SpacyRecognizer
+      type: predefined
+      supported_languages:
+        - fr
+        - en
