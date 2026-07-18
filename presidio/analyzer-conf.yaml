@@ -1,11 +1,16 @@
-# Conf du moteur Presidio pour la passerelle de pseudonymisation.
+# Conf ANALYZER (ANALYZER_CONF_FILE) — volontairement minimale.
 #
-# Français = langue principale (PRESIDIO_LANG=fr côté gateway) ; l'anglais
-# reste chargé en secours (documents anglophones, comparaisons de recette).
+# ⚠️ Historique : tout mettre dans CE fichier (nlp_configuration +
+# recognizer_registry inline) marche sur le main de Presidio mais PAS sur la
+# version embarquée dans l'image — le registre inline y était partiellement
+# ignoré → « supported languages have to be consistent: registry ['en'] vs
+# analyzer ['fr','en'] », worker gunicorn en crash-loop. D'où le schéma
+# canonique à 3 fichiers, stable à travers les versions :
+#   - analyzer-conf.yaml  (ce fichier)     → langues + seuil
+#   - nlp-conf.yaml       (NLP_CONF_FILE)  → modèles spaCy + mapping NER
+#   - recognizers.yaml    (RECOGNIZER_REGISTRY_CONF_FILE) → registre
 #
-# Le mapping ner_model_configuration est EXPLICITE car les modèles spaCy
-# français étiquettent « PER » (pas « PERSON ») : sans ce mapping, les noms
-# détectés par fr_core_news_lg seraient ignorés par Presidio.
+# Les trois listes de langues DOIVENT être cohérentes (fr + en partout).
 supported_languages:
   - fr
   - en
@@ -13,45 +18,3 @@ supported_languages:
 # Seuil géré par l'appelant : la passerelle envoie score_threshold=0.6 dans
 # chaque requête /analyze (src/ner.rs) — on ne filtre pas une 2e fois ici.
 default_score_threshold: 0
-
-nlp_configuration:
-  nlp_engine_name: spacy
-  models:
-    - lang_code: fr
-      model_name: fr_core_news_lg
-    - lang_code: en
-      model_name: en_core_web_lg
-  ner_model_configuration:
-    model_to_presidio_entity_mapping:
-      PER: PERSON
-      PERSON: PERSON
-      LOC: LOCATION
-      LOCATION: LOCATION
-      GPE: LOCATION
-      ORG: ORGANIZATION
-      ORGANIZATION: ORGANIZATION
-      NORP: NRP
-    # MISC (spécifique aux modèles FR : nationalités, œuvres, événements…)
-    # est trop bruyant pour de la pseudonymisation — ignoré.
-    labels_to_ignore:
-      - MISC
-
-# OBLIGATOIRE dès qu'on change supported_languages : sans cette section,
-# Presidio charge son registre par défaut (anglais seul) et refuse de
-# démarrer — « supported languages have to be consistent » (registry ['en']
-# vs analyzer ['fr','en']), gunicorn en crash-loop.
-#
-# On ne déclare QUE le recognizer NER spaCy (PERSON/LOC/ORG) : les motifs
-# (EMAIL/PHONE/IBAN/CARD) sont déjà détectés par les regex de la passerelle
-# elle-même (src/pseudonymize.rs) — inutile de les faire tourner deux fois,
-# et moins de faux positifs des recognizers anglais sur du texte français.
-recognizer_registry:
-  supported_languages:
-    - fr
-    - en
-  recognizers:
-    - name: SpacyRecognizer
-      type: predefined
-      supported_languages:
-        - fr
-        - en

@@ -1,0 +1,28 @@
+# Conf du moteur NLP (NLP_CONF_FILE) — schéma de conf/default.yaml de Presidio.
+#
+# Français = langue principale (PRESIDIO_LANG=fr côté gateway) ; l'anglais
+# reste chargé en secours (documents anglophones).
+nlp_engine_name: spacy
+models:
+  - lang_code: fr
+    model_name: fr_core_news_lg
+  - lang_code: en
+    model_name: en_core_web_lg
+
+# Mapping EXPLICITE : les modèles spaCy français étiquettent « PER »
+# (pas « PERSON ») — sans cette entrée, les noms détectés par
+# fr_core_news_lg seraient ignorés par Presidio.
+ner_model_configuration:
+  model_to_presidio_entity_mapping:
+    PER: PERSON
+    PERSON: PERSON
+    LOC: LOCATION
+    LOCATION: LOCATION
+    GPE: LOCATION
+    ORG: ORGANIZATION
+    ORGANIZATION: ORGANIZATION
+    NORP: NRP
+  # MISC (spécifique aux modèles FR : nationalités, œuvres, événements…)
+  # est trop bruyant pour de la pseudonymisation — ignoré.
+  labels_to_ignore:
+    - MISC

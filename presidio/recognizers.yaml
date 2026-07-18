@@ -1,0 +1,27 @@
+# Registre des recognizers (RECOGNIZER_REGISTRY_CONF_FILE) — schéma de
+# conf/default_recognizers.yaml de Presidio.
+#
+# `supported_languages` ICI est ce que compare la validation de cohérence au
+# démarrage (registry vs analyzer) : fr + en, comme analyzer-conf.yaml.
+#
+# On ne déclare QUE le recognizer NER spaCy (PERSON/LOC/ORG) : les motifs
+# (EMAIL/PHONE/IBAN/CARD) sont déjà détectés par les regex de la passerelle
+# elle-même (src/pseudonymize.rs) — inutile de les faire tourner deux fois,
+# et ça évite les faux positifs des recognizers anglais sur du texte français.
+#
+# ⚠️ Format des langues PAR recognizer : des OBJETS `- language: fr` (schéma
+# du fichier de référence), PAS des chaînes `- fr` — c'est ce qui avait fait
+# échouer la 1re tentative inline.
+supported_languages:
+  - fr
+  - en
+
+# 26 = IGNORECASE | DOTALL | MULTILINE (valeur du fichier de référence).
+global_regex_flags: 26
+
+recognizers:
+  - name: SpacyRecognizer
+    type: predefined
+    supported_languages:
+      - language: fr
+      - language: en

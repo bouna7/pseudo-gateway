@@ -11,7 +11,11 @@ FROM mcr.microsoft.com/presidio-analyzer:latest
 
 RUN python -m spacy download fr_core_news_lg
 
-# Conf moteur (langues supportées, mapping NER → entités Presidio).
-# ANALYZER_CONF_FILE est lu par l'app de l'image officielle au démarrage.
-COPY analyzer-conf.yaml /app/analyzer-conf.yaml
-ENV ANALYZER_CONF_FILE=/app/analyzer-conf.yaml
+# Conf en 3 fichiers séparés (schéma canonique, stable à travers les
+# versions de l'image — la section registre INLINE dans l'analyzer conf est
+# mal lue par certaines versions, cf. commentaires des yaml). Les 3 variables
+# sont lues par l'app de l'image officielle au démarrage (app.py).
+COPY analyzer-conf.yaml nlp-conf.yaml recognizers.yaml /app/conf-fr/
+ENV ANALYZER_CONF_FILE=/app/conf-fr/analyzer-conf.yaml \
+    NLP_CONF_FILE=/app/conf-fr/nlp-conf.yaml \
+    RECOGNIZER_REGISTRY_CONF_FILE=/app/conf-fr/recognizers.yaml
