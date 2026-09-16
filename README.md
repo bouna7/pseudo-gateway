@@ -176,6 +176,87 @@ docker run -p 8080:8080 \
 > passerelle sans `GATEWAY_API_KEY`** (ou la garder sur réseau privé). `/health`
 > et `/` restent ouverts pour les sondes.
 
+## Installer partout (Linux, Windows, macOS — x86_64 et ARM64)
+
+Chaque tag `vX.Y.Z` poussé sur GitHub déclenche `.github/workflows/release.yml`,
+qui publie les binaires dans une Release et les images multi-arch sur GHCR :
+
+```bash
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+**Option 1 — Docker, tout-en-un (Redis + Presidio + passerelle)** : aucune compilation.
+
+```bash
+mkdir pseudo-gateway && cd pseudo-gateway
+curl -LO https://github.com/bouna7/pseudo-gateway/releases/latest/download/docker-compose.yml
+curl -L -o .env https://github.com/bouna7/pseudo-gateway/releases/latest/download/env.example
+docker run --rm ghcr.io/bouna7/pseudo-gateway gen-keys   # coller le résultat dans .env
+docker compose up -d                                      # http://localhost:8080
+```
+
+**Option 2 — binaire seul** (sans Docker ; coffre mémoire ou Redis existant) :
+
+```bash
+# Linux / macOS
+curl -fsSL https://github.com/bouna7/pseudo-gateway/releases/latest/download/install.sh | sh
+pseudo-gateway gen-keys > .env && pseudo-gateway
+```
+
+```powershell
+# Windows
+irm https://github.com/bouna7/pseudo-gateway/releases/latest/download/install.ps1 | iex
+```
+
+Les scripts vérifient l'empreinte SHA-256 de l'archive. Le binaire lit sa
+configuration dans l'environnement ou dans un fichier `.env` du dossier courant
+(voir `.env.example`). `pseudo-gateway --help` liste les commandes.
+
+> Le dépôt et les paquets GHCR doivent être **publics** pour que ces URL
+> fonctionnent sans authentification (GitHub → Packages → *Change visibility*).
+
+## API publique (comptes, clés, quotas)
+
+Définir `ADMIN_API_KEY` active la gestion de comptes. Chaque utilisateur reçoit
+une clé `pgw_…` (stockée hachée, affichée une seule fois) et dispose de son
+**propre espace de jetons** : le tenant est imposé par le serveur (`acc_<id>`,
+et `tenant_id` ne cloisonne qu'à l'intérieur du compte). Un compte ne peut donc
+jamais restituer les jetons d'un autre, même en forgeant `tenant_id`.
+
+`GATEWAY_API_KEY` reste la clé **interne** (files_service) : elle choisit
+librement son `tenant_id`, comme avant. Ne la donnez jamais à un tiers.
+
+| Endpoint | Auth | Rôle |
+|---|---|---|
+| `POST /v1/pseudonymize`, `POST /v1/depseudonymize` | clé compte ou interne | Décomptés (limite/minute + quota mensuel) |
+| `GET /v1/me` | clé compte | Compte + consommation du mois (non décompté) |
+| `POST /v1/signup` | aucune | Inscription libre si `PUBLIC_SIGNUP=true` (limitée par IP) |
+| `POST/GET /admin/accounts`, `GET/PATCH /admin/accounts/{id}` | `X-Admin-Key` | Créer, lister, modifier, désactiver |
+| `POST /admin/accounts/{id}/keys`, `DELETE …/keys/{key_id}` | `X-Admin-Key` | Rotation / révocation de clé |
+
+La clé se passe en `X-Api-Key: <clé>` **ou** `Authorization: Bearer <clé>`.
+Dépassements : `429` avec `Retry-After` (`rate_limited`) ou `quota_exceeded`.
+Les anciens chemins `/pseudonymize` et `/depseudonymize` restent servis.
+
+```bash
+# Créer un compte (admin)
+curl -X POST https://apirag.roostdrive.com/admin/accounts \
+  -H "X-Admin-Key: $ADMIN_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"name": "Acme", "email": "dev@acme.fr", "rate_per_min": 120, "monthly_quota": 50000}'
+# -> { "account": { "id": "acc_…", … }, "api_key": "pgw_…" }
+
+# Appel par le client, depuis n'importe quelle machine
+curl -X POST https://apirag.roostdrive.com/v1/pseudonymize \
+  -H "Authorization: Bearer pgw_…" -H 'Content-Type: application/json' \
+  -d '{"text": "Écrire à marie.dupont@gmail.com"}'
+```
+
+Réglages associés : `DEFAULT_RATE_PER_MIN`, `DEFAULT_MONTHLY_QUOTA`,
+`SIGNUP_PER_IP_PER_HOUR`, `TRUST_PROXY` (IP réelle derrière Traefik),
+`CORS_ALLOWED_ORIGINS` (appels depuis un navigateur), `ENABLE_DOCS` (doc
+interactive sur `/docs`, spec sur `/openapi.json`), `PUBLIC_BASE_URL`,
+`MAX_BODY_BYTES`, `REQUEST_TIMEOUT_SECS`, `PORT`, `BIND_ADDR`.
+
 ## Intégration Spring AI
 
 Le plus propre : un `Advisor` Spring AI qui appelle `/pseudonymize` avant l'envoi
@@ -238,8 +319,17 @@ pseudo-gateway/
 ├── .env.example
 ├── test.sh
 ├── README.md
+├── Dockerfile.release   # image multi-arch à partir des binaires de release
+├── install.sh / install.ps1
+├── deploy/docker-compose.yml   # pile tout-en-un à partir des images GHCR
+├── .github/workflows/   # ci.yml (tests 3 OS) + release.yml (binaires + images)
 └── src/
-    ├── main.rs          # serveur axum + endpoints (+ /health, tenant_id)
+    ├── main.rs          # démarrage : configuration, stores, sous-commandes
+    ├── app.rs           # état partagé + routeur (CORS, limites, doc)
+    ├── api.rs           # endpoints /v1 + spec OpenAPI
+    ├── admin.rs         # /admin : comptes et clés
+    ├── auth.rs          # clés interne / compte / admin
+    ├── accounts.rs      # comptes, clés hachées, limites et quotas (mémoire / Redis)
     ├── crypto.rs        # chiffrement AES-256-GCM brut
     ├── keys.rs          # trousseau : chiffrement versionné + blind index HMAC
     ├── store.rs         # trait VaultStore + InMemoryVaultStore

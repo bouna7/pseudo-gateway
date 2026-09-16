@@ -1,0 +1,56 @@
+# Installation « tout-en-un » sur n'importe quelle machine avec Docker
+# (Linux, Windows, macOS — x86_64 ou ARM64). Aucune compilation : images GHCR.
+#
+#   1. Dans un dossier vide, récupérer ce fichier et le modèle de config :
+#        curl -LO https://github.com/bouna7/pseudo-gateway/releases/latest/download/docker-compose.yml
+#        curl -L -o .env https://github.com/bouna7/pseudo-gateway/releases/latest/download/env.example
+#   2. Générer des secrets et les coller dans .env :
+#        docker run --rm ghcr.io/bouna7/pseudo-gateway gen-keys
+#   3. Démarrer :
+#        docker compose up -d
+#      API sur http://localhost:8080 (PGW_PORT pour changer), doc sur /docs si ENABLE_DOCS=true.
+#
+# Machine avec peu de RAM (< 3 Go) : `docker compose up -d redis gateway` démarre
+# sans Presidio — seuls emails / téléphones / IBAN / cartes et les `custom_terms`
+# sont alors masqués (les noms ne le sont PAS automatiquement).
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # NER (noms, lieux, organisations), local : aucune donnée ne sort de la machine.
+  # ~2 Go de RAM ; 30-60 s de chargement au premier démarrage.
+  presidio:
+    image: ghcr.io/bouna7/pseudo-gateway-presidio:${PGW_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      GUNICORN_CMD_ARGS: "--timeout 300"
+
+  gateway:
+    image: ghcr.io/bouna7/pseudo-gateway:${PGW_VERSION:-latest}
+    env_file: .env
+    # Valeurs imposées par cette pile (priment sur .env).
+    environment:
+      VAULT_STORE: redis
+      REDIS_URL: redis://redis:6379
+      PRESIDIO_URL: http://presidio:3000
+      PRESIDIO_LANG: fr
+      BIND_ADDR: 0.0.0.0
+      PORT: "8080"
+    ports:
+      - "${PGW_BIND:-0.0.0.0}:${PGW_PORT:-8080}:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  redis-data:

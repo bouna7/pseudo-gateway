@@ -1,0 +1,166 @@
+# Distribution « partout » : pousser un tag `vX.Y.Z` produit
+#   - les binaires Linux / Windows / macOS (x86_64 + ARM64) dans une Release GitHub ;
+#   - l'image multi-arch ghcr.io/<owner>/pseudo-gateway (amd64 + arm64) ;
+#   - l'image NER ghcr.io/<owner>/pseudo-gateway-presidio (amd64 + arm64).
+#
+#   git tag v0.2.0 && git push origin v0.2.0
+#
+# Lancement manuel possible (workflow_dispatch) : images taguées `sha-…`, sans Release.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/pseudo-gateway
+
+jobs:
+  binaries:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-24.04, archive: tar.gz }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm, archive: tar.gz }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest, archive: zip }
+          - { target: aarch64-pc-windows-msvc, os: windows-latest, archive: zip }
+          - { target: x86_64-apple-darwin, os: macos-latest, archive: tar.gz }
+          - { target: aarch64-apple-darwin, os: macos-latest, archive: tar.gz }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      # Binaires Linux statiques (musl) : tournent sur toute distribution.
+      - if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Archive (Linux / macOS)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          name="pseudo-gateway-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/pseudo-gateway" README.md .env.example "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+      - name: Archive (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $name = "pseudo-gateway-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force "dist/$name" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/pseudo-gateway.exe", README.md, .env.example "dist/$name/"
+          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.target }}
+          path: dist/*.${{ matrix.archive }}
+      # Binaire nu pour l'image Docker (pas de recompilation sous émulation).
+      - if: contains(matrix.target, 'linux')
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/pseudo-gateway
+
+  github-release:
+    needs: binaries
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*
+          path: dist
+          merge-multiple: true
+      - name: Scripts d'installation + compose + empreintes
+        run: |
+          cp install.sh install.ps1 dist/
+          cp deploy/docker-compose.yml dist/docker-compose.yml
+          cp .env.example dist/env.example
+          cd dist && sha256sum * > SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+
+  image:
+    needs: binaries
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: docker-*
+          path: artifacts
+      - name: Binaires par architecture
+        run: |
+          mkdir -p dist-docker/amd64 dist-docker/arm64
+          cp artifacts/docker-x86_64-unknown-linux-musl/pseudo-gateway dist-docker/amd64/
+          cp artifacts/docker-aarch64-unknown-linux-musl/pseudo-gateway dist-docker/arm64/
+          chmod +x dist-docker/*/pseudo-gateway
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=sha
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.release
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  presidio-image:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # arm64 construit sous émulation : seul un `pip`/`spacy download` s'y exécute.
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}-presidio
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=sha
+      - uses: docker/build-push-action@v6
+        with:
+          context: presidio
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=presidio
+          cache-to: type=gha,mode=max,scope=presidio
