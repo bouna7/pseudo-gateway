@@ -28,3 +28,21 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Coffre persistant et partagé. ConnectionManager = pool multiplexé auto-reconnectant.
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+# API publique : CORS, limite de corps, timeout de requête.
+tower-http = { version = "0.5", features = ["cors", "limit", "timeout"] }
+# Comparaison de clés d'API en temps constant (pas de fuite par chronométrage).
+subtle = "2"
+# Spécification OpenAPI générée depuis le code (servie sur /openapi.json).
+utoipa = "5"
+# Lecture d'un fichier .env à côté du binaire (installation hors Docker).
+dotenvy = "0.15"
+
+[dev-dependencies]
+# Tests du routeur sans ouvrir de port (ServiceExt::oneshot).
+tower = { version = "0.4", features = ["util"] }
+
+# Binaires distribués : petits et rapides.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
