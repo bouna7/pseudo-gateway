@@ -357,24 +357,36 @@ impl Accounts {
     }
 
     /// Décompte la requête et refuse si la limite par minute ou le quota est dépassé.
+    ///
+    /// Une requête refusée n'est PAS décomptée : sinon un client bloqué qui
+    /// réessaie en boucle ferait grimper son compteur, et resterait bloqué même
+    /// après une hausse de son quota (constaté en test : 4 requêtes comptées
+    /// pour 2 servies). Minute d'abord, mois ensuite : si le mois refuse, seule
+    /// une case de la minute courante est perdue, jamais du quota mensuel.
     pub async fn enforce_limits(&self, a: &Account) -> Result<(), AppError> {
         let now = now_secs();
-        if a.rate_per_min > 0 {
-            let n = self
-                .store
-                .hit(&format!("rl:{}:{}", a.id, now / 60), 61)
-                .await?;
-            if n > u64::from(a.rate_per_min) {
-                return Err(AppError::RateLimited {
-                    retry_after: 60 - now % 60,
-                });
-            }
-        }
-        let n = self
+        let minute_ok = self
             .store
-            .hit(&format!("q:{}:{}", a.id, month_of(now)), 32 * 86_400)
+            .try_hit(
+                &format!("rl:{}:{}", a.id, now / 60),
+                u64::from(a.rate_per_min),
+                61,
+            )
             .await?;
-        if a.monthly_quota > 0 && n > a.monthly_quota {
+        if !minute_ok {
+            return Err(AppError::RateLimited {
+                retry_after: 60 - now % 60,
+            });
+        }
+        let month_ok = self
+            .store
+            .try_hit(
+                &format!("q:{}:{}", a.id, month_of(now)),
+                a.monthly_quota,
+                32 * 86_400,
+            )
+            .await?;
+        if !month_ok {
             return Err(AppError::QuotaExceeded {
                 limit: a.monthly_quota,
             });
@@ -395,11 +407,11 @@ impl Accounts {
     /// Limite générique par fenêtre fixe (ex. inscriptions par IP et par heure).
     pub async fn throttle(&self, bucket: &str, limit: u64, window_secs: u64) -> Result<(), AppError> {
         let now = now_secs();
-        let n = self
+        let ok = self
             .store
-            .hit(&format!("{bucket}:{}", now / window_secs), window_secs + 1)
+            .try_hit(&format!("{bucket}:{}", now / window_secs), limit, window_secs + 1)
             .await?;
-        if n > limit {
+        if !ok {
             return Err(AppError::RateLimited {
                 retry_after: window_secs - now % window_secs,
             });
@@ -419,8 +431,10 @@ pub trait AccountStore: Send + Sync {
     async fn bind_key(&self, hash: &str, account_id: &str) -> Result<(), VaultError>;
     async fn unbind_key(&self, hash: &str) -> Result<(), VaultError>;
     async fn account_id_for_key(&self, hash: &str) -> Result<Option<String>, VaultError>;
-    /// Incrémente un compteur (créé avec une durée de vie `ttl_secs`) et renvoie sa valeur.
-    async fn hit(&self, counter: &str, ttl_secs: u64) -> Result<u64, VaultError>;
+    /// Incrémente le compteur **seulement s'il est sous `limit`** (0 = illimité),
+    /// de façon atomique, et dit si la requête est acceptée. Le compteur est
+    /// créé avec une durée de vie `ttl_secs`.
+    async fn try_hit(&self, counter: &str, limit: u64, ttl_secs: u64) -> Result<bool, VaultError>;
     /// Valeur actuelle d'un compteur (0 s'il n'existe pas).
     async fn peek(&self, counter: &str) -> Result<u64, VaultError>;
 }
@@ -480,7 +494,7 @@ impl AccountStore for InMemoryAccountStore {
         Ok(self.lock()?.keys.get(hash).cloned())
     }
 
-    async fn hit(&self, counter: &str, ttl_secs: u64) -> Result<u64, VaultError> {
+    async fn try_hit(&self, counter: &str, limit: u64, ttl_secs: u64) -> Result<bool, VaultError> {
         let mut g = self.lock()?;
         let now = Instant::now();
         // Purge paresseuse pour ne pas grossir indéfiniment.
@@ -494,8 +508,11 @@ impl AccountStore for InMemoryAccountStore {
         if entry.1 <= now {
             *entry = (0, now + Duration::from_secs(ttl_secs));
         }
+        if limit > 0 && entry.0 >= limit {
+            return Ok(false);
+        }
         entry.0 += 1;
-        Ok(entry.0)
+        Ok(true)
     }
 
     async fn peek(&self, counter: &str) -> Result<u64, VaultError> {
@@ -507,19 +524,24 @@ impl AccountStore for InMemoryAccountStore {
     }
 }
 
-/// INCR + EXPIRE atomiques (la durée de vie n'est posée qu'à la création).
-const HIT_LUA: &str = r#"
-local n = redis.call('INCR', KEYS[1])
-if n == 1 then
+/// Vérification + INCR + EXPIRE atomiques : on n'incrémente que sous la limite
+/// (ARGV[2], 0 = illimité), et la durée de vie n'est posée qu'à la création.
+/// Renvoie 1 si la requête est acceptée, 0 sinon.
+const TRY_HIT_LUA: &str = r#"
+local limit = tonumber(ARGV[2])
+if limit > 0 and tonumber(redis.call('GET', KEYS[1]) or '0') >= limit then
+  return 0
+end
+if redis.call('INCR', KEYS[1]) == 1 then
   redis.call('EXPIRE', KEYS[1], ARGV[1])
 end
-return n
+return 1
 "#;
 
 /// Comptes dans Redis, sous le préfixe `pga:` (distinct du coffre `pg:{…}`).
 pub struct RedisAccountStore {
     conn: ConnectionManager,
-    hit: Script,
+    try_hit: Script,
 }
 
 impl RedisAccountStore {
@@ -528,7 +550,7 @@ impl RedisAccountStore {
         let conn = ConnectionManager::new(client).await.map_err(store_err)?;
         Ok(Self {
             conn,
-            hit: Script::new(HIT_LUA),
+            try_hit: Script::new(TRY_HIT_LUA),
         })
     }
 }
@@ -589,14 +611,17 @@ impl AccountStore for RedisAccountStore {
         c.get(format!("pga:key:{hash}")).await.map_err(store_err)
     }
 
-    async fn hit(&self, counter: &str, ttl_secs: u64) -> Result<u64, VaultError> {
+    async fn try_hit(&self, counter: &str, limit: u64, ttl_secs: u64) -> Result<bool, VaultError> {
         let mut c = self.conn.clone();
-        self.hit
+        let accepted: u8 = self
+            .try_hit
             .key(format!("pga:c:{counter}"))
             .arg(ttl_secs)
+            .arg(limit)
             .invoke_async(&mut c)
             .await
-            .map_err(store_err)
+            .map_err(store_err)?;
+        Ok(accepted == 1)
     }
 
     async fn peek(&self, counter: &str) -> Result<u64, VaultError> {
@@ -680,7 +705,60 @@ mod tests {
             s.enforce_limits(&a).await,
             Err(AppError::QuotaExceeded { limit: 1 })
         ));
+        // Seule la requête servie est comptée.
+        assert_eq!(s.usage(&a).await.unwrap().requests, 1);
+    }
+
+    /// Même garantie côté Redis (script Lua) — nécessite un Redis joignable.
+    /// Lancer : `REDIS_URL=redis://127.0.0.1:6379 cargo test -- --ignored`
+    #[tokio::test]
+    #[ignore = "nécessite un Redis (cf. docker-compose) ; lancer avec --ignored"]
+    async fn redis_try_hit_ne_compte_pas_les_refus() {
+        let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+        let store = RedisAccountStore::connect(&url).await.expect("connexion Redis");
+        let counter = format!("test:try_hit:{}", random_hex(6));
+        assert!(store.try_hit(&counter, 2, 60).await.unwrap());
+        assert!(store.try_hit(&counter, 2, 60).await.unwrap());
+        for _ in 0..5 {
+            assert!(!store.try_hit(&counter, 2, 60).await.unwrap());
+        }
+        assert_eq!(store.peek(&counter).await.unwrap(), 2);
+        // Limite relevée : accepté aussitôt.
+        assert!(store.try_hit(&counter, 3, 60).await.unwrap());
+        // 0 = illimité.
+        assert!(store.try_hit(&counter, 0, 60).await.unwrap());
+        assert_eq!(store.peek(&counter).await.unwrap(), 4);
+    }
+
+    /// Scénario constaté en test manuel : un client bloqué réessaie en boucle,
+    /// puis l'admin relève son quota. Il doit être débloqué aussitôt — ce qui
+    /// suppose que les refus n'aient pas gonflé son compteur.
+    #[tokio::test]
+    async fn refus_non_decomptes_hausse_de_quota_debloque() {
+        let s = service(0, 2);
+        let (mut a, _) = s.create(new("A")).await.unwrap();
+        s.enforce_limits(&a).await.unwrap();
+        s.enforce_limits(&a).await.unwrap();
+        for _ in 0..10 {
+            assert!(matches!(
+                s.enforce_limits(&a).await,
+                Err(AppError::QuotaExceeded { .. })
+            ));
+        }
         assert_eq!(s.usage(&a).await.unwrap().requests, 2);
+
+        a = s
+            .update(
+                &a.id,
+                AccountPatch {
+                    monthly_quota: Some(3),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        s.enforce_limits(&a).await.unwrap();
+        assert_eq!(s.usage(&a).await.unwrap().requests, 3);
     }
 
     #[tokio::test]
