@@ -1,154 +1,140 @@
 //! Passerelle de pseudonymisation chiffrée.
 //!
-//! Deux endpoints HTTP :
-//!   POST /pseudonymize   { text, custom_terms?, tenant_id? } -> { text, tokens }
-//!   POST /depseudonymize { text, tenant_id? }                -> { text }
-//!   GET  /health                                             -> "ok"
+//! Endpoints HTTP (voir `/docs` si `ENABLE_DOCS=true`) :
+//!   POST /v1/pseudonymize   { text, custom_terms?, tenant_id? } -> { text, tokens }
+//!   POST /v1/depseudonymize { text, tenant_id? }                -> { text }
+//!   GET  /v1/me                                                 -> compte + consommation
+//!   POST /v1/signup         { name, email }                     -> compte + clé (si PUBLIC_SIGNUP)
+//!   /admin/*                gestion des comptes et clés        (si ADMIN_API_KEY)
+//!   GET  /health                                                -> "ok"
 //!
-//! Le coffre (jeton <-> valeur réelle chiffrée AES-256-GCM) est désormais derrière
-//! le trait `VaultStore`. Phase 1 : `InMemoryVaultStore` (perdu au redémarrage).
-//! Phase 2 : `RedisVaultStore` persistant, sélectionnable par configuration.
+//! `/pseudonymize` et `/depseudonymize` (sans `/v1`) restent servis pour les
+//! clients historiques.
+//!
+//! Le coffre (jeton <-> valeur réelle chiffrée AES-256-GCM) est derrière le trait
+//! `VaultStore` : `InMemoryVaultStore` (dev) ou `RedisVaultStore` (persistant).
 
+mod accounts;
+mod admin;
+mod api;
+mod app;
+mod auth;
 mod crypto;
 mod error;
+mod extract;
 mod keys;
 mod ner;
 mod pseudonymize;
 mod store;
 
-use axum::{
-    extract::{Request, State},
-    http::HeaderMap,
-    middleware::{self, Next},
-    response::Response,
-    routing::{get, post},
-    Json, Router,
-};
-use error::AppError;
+use accounts::{AccountStore, Accounts, InMemoryAccountStore, PlanDefaults, RedisAccountStore};
+use app::{AppState, HttpConfig};
 use keys::{EnvKeyProvider, KeyProvider};
-use pseudonymize::{CustomTerm, Vault};
-use serde::{Deserialize, Serialize};
+use pseudonymize::Vault;
+use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use store::{InMemoryVaultStore, RedisVaultStore, VaultStore};
 
-/// Espace de jetons par défaut quand l'appelant ne fournit pas de `tenant_id`
-/// (rétro-compatibilité avec l'API d'origine).
-const DEFAULT_TENANT: &str = "_global";
-
-#[derive(Clone)]
-struct AppState {
-    vault: Arc<Vault>,
-    /// Clé d'API exigée sur les endpoints sensibles (header `X-Api-Key`).
-    /// `None` = pas d'authentification (dev). Définie via `GATEWAY_API_KEY`.
-    api_key: Option<Arc<String>>,
+/// Variable d'environnement non vide (un `${VAR:-}` de compose injecte "").
+fn env_opt(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
-/// Middleware : exige `X-Api-Key` correct quand `GATEWAY_API_KEY` est configurée.
-/// Laisse passer si aucune clé n'est configurée (mode dev).
-async fn require_api_key(
-    State(st): State<AppState>,
-    headers: HeaderMap,
-    req: Request,
-    next: Next,
-) -> Result<Response, AppError> {
-    if let Some(expected) = &st.api_key {
-        let provided = headers
-            .get("x-api-key")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        if provided != expected.as_str() {
-            return Err(AppError::Unauthorized);
-        }
+fn env_parse<T: std::str::FromStr>(name: &str, default: T) -> T {
+    match env_opt(name) {
+        None => default,
+        Some(v) => v.parse().unwrap_or_else(|_| {
+            tracing::warn!(%name, value = %v, "valeur invalide — valeur par défaut utilisée");
+            default
+        }),
     }
-    Ok(next.run(req).await)
 }
 
-#[derive(Deserialize)]
-struct CustomTermDto {
-    #[serde(rename = "type")]
-    typ: String,
-    value: String,
+fn env_flag(name: &str) -> bool {
+    env_opt(name).is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
 }
 
-#[derive(Deserialize)]
-struct PseudoReq {
-    text: String,
-    #[serde(default)]
-    custom_terms: Vec<CustomTermDto>,
-    /// Espace de jetons (isolation par client/document). Optionnel.
-    #[serde(default)]
-    tenant_id: Option<String>,
+fn fail(msg: &str, err: impl std::fmt::Display) -> ! {
+    tracing::error!(error = %err, "{msg} — arrêt");
+    std::process::exit(1);
 }
 
-#[derive(Serialize)]
-struct PseudoResp {
-    text: String,
-    tokens: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct DepseudoReq {
-    text: String,
-    #[serde(default)]
-    tenant_id: Option<String>,
-}
-
-#[derive(Serialize)]
-struct DepseudoResp {
-    text: String,
-}
-
-/// Sonde de disponibilité (utilisée par Dokploy / load balancer). Vérifie aussi
-/// l'accès au store (PING Redis) → 503 si le backend est injoignable.
-async fn health(State(st): State<AppState>) -> Result<&'static str, AppError> {
-    st.vault.ping().await?;
-    Ok("ok")
-}
-
-async fn pseudonymize_handler(
-    State(st): State<AppState>,
-    Json(req): Json<PseudoReq>,
-) -> Result<Json<PseudoResp>, AppError> {
-    let tenant = req.tenant_id.as_deref().unwrap_or(DEFAULT_TENANT);
-
-    // 1) Termes fournis manuellement par l'appelant.
-    let mut terms: Vec<CustomTerm> = req
-        .custom_terms
-        .into_iter()
-        .map(|c| CustomTerm {
-            typ: c.typ,
-            value: c.value,
-        })
-        .collect();
-
-    // 2) Détection automatique (NER) via Presidio. Best effort : si le service est
-    //    indisponible, on continue avec la regex + les termes manuels.
-    match ner::analyze(&req.text).await {
-        Ok(entities) => {
-            for (typ, value) in ner::to_terms(&req.text, &entities) {
-                terms.push(CustomTerm { typ, value });
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut s) => {
+                s.recv().await;
             }
+            Err(_) => std::future::pending::<()>().await,
         }
-        Err(e) => tracing::warn!(error = %e, "NER (Presidio) indisponible — repli regex + termes manuels"),
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
     }
-
-    // 3) Jetonnage + chiffrement (la synchronisation vit dans le store).
-    let (text, tokens) = st.vault.pseudonymize(tenant, &req.text, &terms).await?;
-    tracing::info!(%tenant, tokens = tokens.len(), "pseudonymisation effectuée");
-    Ok(Json(PseudoResp { text, tokens }))
+    tracing::info!("arrêt demandé — fin des requêtes en cours");
 }
 
-async fn depseudonymize_handler(
-    State(st): State<AppState>,
-    Json(req): Json<DepseudoReq>,
-) -> Result<Json<DepseudoResp>, AppError> {
-    let tenant = req.tenant_id.as_deref().unwrap_or(DEFAULT_TENANT);
-    let text = st.vault.depseudonymize(tenant, &req.text).await?;
-    Ok(Json(DepseudoResp { text }))
+const HELP: &str = "\
+pseudo-gateway — passerelle de pseudonymisation chiffrée
+
+USAGE :
+  pseudo-gateway            démarre le serveur (configuration : variables d'env ou .env)
+  pseudo-gateway gen-keys   affiche des secrets neufs, prêts à coller dans .env
+  pseudo-gateway --version  affiche la version
+
+Variables principales : PSEUDO_KEY_1, PSEUDO_INDEX_KEY, VAULT_STORE, REDIS_URL,
+GATEWAY_API_KEY, ADMIN_API_KEY, PUBLIC_SIGNUP, CORS_ALLOWED_ORIGINS, ENABLE_DOCS,
+PORT, BIND_ADDR, PRESIDIO_URL (voir .env.example).";
+
+/// Sous-commandes hors serveur. Renvoie `true` si le processus doit s'arrêter.
+fn run_command() -> bool {
+    match std::env::args().nth(1).as_deref() {
+        None => false,
+        Some("gen-keys") => {
+            // Sortie ASCII : redirigeable telle quelle vers .env, y compris sous PowerShell 5.1.
+            println!("# pseudo-gateway gen-keys - secrets a garder hors de git");
+            println!("PSEUDO_KEY_1={}", accounts::random_hex(32));
+            println!("PSEUDO_CURRENT_KEY_ID=1");
+            println!("PSEUDO_INDEX_KEY={}", accounts::random_hex(32));
+            println!("GATEWAY_API_KEY={}", accounts::random_hex(24));
+            println!("ADMIN_API_KEY={}", accounts::random_hex(24));
+            true
+        }
+        Some("--version" | "-V" | "version") => {
+            println!("pseudo-gateway {}", env!("CARGO_PKG_VERSION"));
+            true
+        }
+        Some("--help" | "-h" | "help") => {
+            println!("{HELP}");
+            true
+        }
+        Some(other) => {
+            eprintln!("commande inconnue : {other}\n\n{HELP}");
+            std::process::exit(2);
+        }
+    }
 }
 
 #[tokio::main]
 async fn main() {
+    if run_command() {
+        return;
+    }
+
+    // Installation hors Docker : un fichier .env à côté du binaire suffit.
+    let dotenv = dotenvy::dotenv().ok();
+
     // Logs structurés ; niveau pilotable par RUST_LOG (défaut info).
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -156,72 +142,120 @@ async fn main() {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
-
-    // Chargement des clés via le fournisseur (env versionné aujourd'hui, Vault/KMS demain).
-    let keyring = match EnvKeyProvider.load().await {
-        Ok(k) => k,
-        Err(e) => {
-            tracing::error!(error = %e, "chargement des clés impossible — arrêt");
-            std::process::exit(1);
-        }
-    };
-
-    // Choix du backend de coffre : VAULT_STORE=redis pour la persistance, sinon mémoire.
-    let store: Arc<dyn VaultStore> = match std::env::var("VAULT_STORE").as_deref() {
-        Ok("redis") => {
-            let url = std::env::var("REDIS_URL")
-                .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
-            match RedisVaultStore::connect(&url).await {
-                Ok(s) => {
-                    tracing::info!(%url, "coffre Redis connecté (persistant)");
-                    Arc::new(s)
-                }
-                Err(e) => {
-                    // Fail-fast : en mode redis, on ne démarre pas sur un coffre absent.
-                    tracing::error!(error = %e, %url, "connexion Redis impossible — arrêt");
-                    std::process::exit(1);
-                }
-            }
-        }
-        _ => {
-            tracing::warn!("coffre EN MÉMOIRE (non persistant) — VAULT_STORE=redis pour la prod");
-            Arc::new(InMemoryVaultStore::new())
-        }
-    };
-
-    // Clé d'API optionnelle pour protéger les endpoints sensibles.
-    let api_key = std::env::var("GATEWAY_API_KEY")
-        .ok()
-        .filter(|k| !k.is_empty())
-        .map(Arc::new);
-    if api_key.is_some() {
-        tracing::info!("authentification par clé d'API activée (header X-Api-Key)");
-    } else {
-        tracing::warn!("GATEWAY_API_KEY non définie — endpoints NON protégés (dev uniquement)");
+    if let Some(path) = dotenv {
+        tracing::info!(path = %path.display(), "configuration chargée depuis .env");
     }
 
+    // Chargement des clés via le fournisseur (env versionné aujourd'hui, Vault/KMS demain).
+    let keyring = EnvKeyProvider
+        .load()
+        .await
+        .unwrap_or_else(|e| fail("chargement des clés impossible", e));
+
+    // Choix du backend : VAULT_STORE=redis pour la persistance, sinon mémoire.
+    // Les comptes de l'API publique suivent le même backend.
+    let (store, account_store): (Arc<dyn VaultStore>, Arc<dyn AccountStore>) =
+        match env_opt("VAULT_STORE").as_deref() {
+            Some("redis") => {
+                let url = env_opt("REDIS_URL").unwrap_or_else(|| "redis://127.0.0.1:6379".into());
+                // Fail-fast : en mode redis, on ne démarre pas sur un coffre absent.
+                let vault = RedisVaultStore::connect(&url)
+                    .await
+                    .unwrap_or_else(|e| fail("connexion Redis impossible", e));
+                let accts = RedisAccountStore::connect(&url)
+                    .await
+                    .unwrap_or_else(|e| fail("connexion Redis impossible", e));
+                tracing::info!(%url, "coffre Redis connecté (persistant)");
+                (Arc::new(vault), Arc::new(accts))
+            }
+            _ => {
+                tracing::warn!("coffre EN MÉMOIRE (non persistant) — VAULT_STORE=redis pour la prod");
+                (Arc::new(InMemoryVaultStore::new()), Arc::new(InMemoryAccountStore::new()))
+            }
+        };
+
+    // Clé interne historique (files_service…).
+    let api_key = env_opt("GATEWAY_API_KEY").map(Arc::new);
+    // Clé d'administration : active l'API publique (comptes + clés par utilisateur).
+    let admin_key = env_opt("ADMIN_API_KEY").map(Arc::new);
+    let accounts = admin_key.as_ref().map(|_| {
+        let defaults = PlanDefaults::from_env();
+        tracing::info!(
+            plan = %defaults.plan,
+            rate_per_min = defaults.rate_per_min,
+            monthly_quota = defaults.monthly_quota,
+            "API publique activée (comptes + /admin)"
+        );
+        Arc::new(Accounts::new(account_store, defaults))
+    });
+
+    let signup_per_hour = match (env_flag("PUBLIC_SIGNUP"), accounts.is_some()) {
+        (true, true) => {
+            let n = env_parse("SIGNUP_PER_IP_PER_HOUR", 5u64);
+            tracing::info!(per_ip_per_hour = n, "inscription publique ouverte (/v1/signup)");
+            Some(n)
+        }
+        (true, false) => {
+            tracing::warn!("PUBLIC_SIGNUP ignoré : ADMIN_API_KEY requise pour gérer les comptes");
+            None
+        }
+        _ => None,
+    };
+
+    if api_key.is_some() {
+        tracing::info!("clé d'API interne activée (X-Api-Key / Bearer)");
+    }
+    if api_key.is_none() && accounts.is_none() {
+        tracing::warn!(
+            "ni GATEWAY_API_KEY ni ADMIN_API_KEY — endpoints NON protégés (dev uniquement)"
+        );
+    }
+
+    let trust_proxy = env_flag("TRUST_PROXY");
     let state = AppState {
         vault: Arc::new(Vault::new(keyring, store)),
         api_key,
+        admin_key,
+        accounts,
+        signup_per_hour,
+        trust_proxy,
     };
 
-    // Endpoints sensibles derrière la garde clé d'API ; / et /health restent ouverts.
-    let protected = Router::new()
-        .route("/pseudonymize", post(pseudonymize_handler))
-        .route("/depseudonymize", post(depseudonymize_handler))
-        .route_layer(middleware::from_fn_with_state(state.clone(), require_api_key));
+    let http = HttpConfig {
+        max_body_bytes: env_parse("MAX_BODY_BYTES", 1024 * 1024),
+        request_timeout: Duration::from_secs(env_parse("REQUEST_TIMEOUT_SECS", 30)),
+        cors_origins: env_opt("CORS_ALLOWED_ORIGINS").map(|v| {
+            v.split(',')
+                .map(|o| o.trim().to_string())
+                .filter(|o| !o.is_empty())
+                .collect()
+        }),
+        docs: env_flag("ENABLE_DOCS"),
+        public_base_url: env_opt("PUBLIC_BASE_URL"),
+    };
+    if let Some(origins) = &http.cors_origins {
+        tracing::info!(?origins, "CORS activé");
+    }
+    if http.docs {
+        tracing::info!("documentation publiée sur /docs et /openapi.json");
+    }
 
-    let app = Router::new()
-        .route("/health", get(health))
-        .merge(protected)
-        .with_state(state);
+    let app = app::router(state, &http);
 
-    let addr = "0.0.0.0:8080";
-    let listener = tokio::net::TcpListener::bind(addr)
+    let host = env_opt("BIND_ADDR").unwrap_or_else(|| "0.0.0.0".into());
+    let port: u16 = env_parse("PORT", 8080);
+    let addr = format!("{host}:{port}");
+    let listener = tokio::net::TcpListener::bind(&addr)
         .await
-        .expect("impossible de se lier au port 8080");
-    tracing::info!("Passerelle de pseudonymisation prête sur http://{addr}");
-    axum::serve(listener, app)
-        .await
-        .expect("le serveur axum s'est arrêté");
+        .unwrap_or_else(|e| fail(&format!("impossible d'écouter sur {addr}"), e));
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "Passerelle de pseudonymisation prête sur http://{addr}");
+    if let Err(e) = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    {
+        fail("le serveur s'est arrêté", e);
+    }
 }

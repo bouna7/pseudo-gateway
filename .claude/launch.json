@@ -1,0 +1,6 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    { "name": "pseudo-gateway", "runtimeExecutable": "cargo", "runtimeArgs": ["run"], "port": 8080 }
+  ]
+}

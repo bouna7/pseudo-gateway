@@ -47,6 +47,9 @@ struct Hit {
     end: usize,
     typ: String,
     value: String,
+    /// Détecteur à format strict (regex : EMAIL, IBAN, CARD, PHONE) par opposition
+    /// aux termes fournis et au NER, qui sont probabilistes.
+    strict: bool,
 }
 
 /// Coffre logique : détient les clés (chiffrement + blind index) et délègue la
@@ -99,6 +102,7 @@ impl Vault {
                     end: start + sub.len(),
                     typ: t.typ.clone(),
                     value: t.value.clone(),
+                    strict: false,
                 });
             }
         }
@@ -109,17 +113,26 @@ impl Vault {
                     end: m.end(),
                     typ: (*typ).to_string(),
                     value: m.as_str().to_string(),
+                    strict: true,
                 });
             }
         }
 
-        // 2) Résolution des chevauchements : « la plus longue gagne ». On retient
-        //    d'abord les correspondances les plus longues ; toute correspondance
-        //    qui en chevauche une déjà retenue est écartée (ex. « Marie » est
-        //    écarté au profit de « Marie Dupont »).
+        // 2) Résolution des chevauchements : les détecteurs à format strict
+        //    d'abord, puis « la plus longue gagne ». Toute correspondance qui en
+        //    chevauche une déjà retenue est écartée (ex. « Marie » est écarté au
+        //    profit de « Marie Dupont »).
+        //
+        //    Pourquoi le format strict prime : le NER étiquette parfois une
+        //    adresse e-mail comme LOCATION (constaté avec le modèle français de
+        //    Presidio sur `marie.dupont@gmail.com`, même plage exacte que la
+        //    regex). La donnée restait masquée, mais sous un type faux. Une regex
+        //    d'e-mail/IBAN/carte ne se trompe pas sur la nature de ce qu'elle
+        //    reconnaît, contrairement à un modèle statistique.
         hits.sort_by(|a, b| {
-            (b.end - b.start)
-                .cmp(&(a.end - a.start))
+            b.strict
+                .cmp(&a.strict)
+                .then((b.end - b.start).cmp(&(a.end - a.start)))
                 .then(a.start.cmp(&b.start))
         });
         let mut selected: Vec<Hit> = Vec::new();
@@ -234,6 +247,28 @@ mod tests {
             .unwrap();
         assert_eq!(clean, "[PERSON_1] arrive demain");
         assert_eq!(tokens, vec!["PERSON_1".to_string()]);
+    }
+
+    /// Le NER (Presidio FR) étiquette parfois une adresse e-mail comme LOCATION,
+    /// sur la plage exacte de la regex. Le format strict doit l'emporter, sinon
+    /// l'e-mail sort en `[LOC_n]` — masqué, mais sous un type faux.
+    #[tokio::test]
+    async fn format_strict_prime_sur_le_ner() {
+        let v = vault();
+        let terms = vec![
+            CustomTerm { typ: "LOC".into(), value: "marie.dupont@gmail.com".into() },
+            // Même cas avec un terme plus long que la regex.
+            CustomTerm { typ: "LOC".into(), value: "au 06 12 34 56 78".into() },
+        ];
+        let (clean, _) = v
+            .pseudonymize(
+                "_global",
+                "Ecrire a marie.dupont@gmail.com ou au 06 12 34 56 78",
+                &terms,
+            )
+            .await
+            .unwrap();
+        assert_eq!(clean, "Ecrire a [EMAIL_1] ou au [PHONE_1]");
     }
 
     #[tokio::test]

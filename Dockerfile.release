@@ -1,0 +1,13 @@
+# Image de distribution multi-arch (amd64 + arm64), construite par
+# .github/workflows/release.yml à partir des binaires musl statiques déjà
+# compilés — aucune compilation sous émulation.
+#
+# Pour construire depuis les sources (Dokploy), utiliser le `Dockerfile`.
+FROM gcr.io/distroless/static-debian12:nonroot
+
+ARG TARGETARCH
+COPY --chmod=755 dist-docker/${TARGETARCH}/pseudo-gateway /usr/local/bin/pseudo-gateway
+
+EXPOSE 8080
+ENV RUST_LOG=info
+ENTRYPOINT ["/usr/local/bin/pseudo-gateway"]
