@@ -1,9 +1,12 @@
 # Installe le binaire pseudo-gateway sur Windows (x64 ou ARM64).
 #
+# Messages sans accents : lance par "irm ... | iex", le script est decode en
+# ANSI par PowerShell 5.1, ce qui abime tout caractere accentue.
+#
 #   irm https://github.com/bouna7/pseudo-gateway/releases/latest/download/install.ps1 | iex
 #
-# Variables : $env:VERSION (ex. v0.2.0, défaut : dernière release),
-#             $env:INSTALL_DIR (défaut : %LOCALAPPDATA%\pseudo-gateway).
+# Variables : $env:VERSION (ex. v0.2.0, defaut : derniere release),
+#             $env:INSTALL_DIR (defaut : %LOCALAPPDATA%\pseudo-gateway).
 $ErrorActionPreference = 'Stop'
 
 $repo = 'bouna7/pseudo-gateway'
@@ -20,7 +23,7 @@ $base = if ($env:VERSION) { "https://github.com/$repo/releases/download/$($env:V
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid())
 New-Item -ItemType Directory -Path $tmp | Out-Null
 try {
-    Write-Host "Téléchargement de $asset.zip…"
+    Write-Host "Telechargement de $asset.zip..."
     $zip = Join-Path $tmp "$asset.zip"
     $sums = Join-Path $tmp 'SHA256SUMS'
     Invoke-WebRequest -UseBasicParsing -Uri "$base/$asset.zip" -OutFile $zip
@@ -29,7 +32,7 @@ try {
     $line = Get-Content $sums | Where-Object { $_ -match " $([regex]::Escape("$asset.zip"))$" } | Select-Object -First 1
     $expected = if ($line) { ($line -split '\s+')[0] } else { '' }
     $actual = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
-    if (-not $expected -or $expected -ne $actual) { throw 'Empreinte SHA-256 invalide — installation annulée.' }
+    if (-not $expected -or $expected -ne $actual) { throw 'Empreinte SHA-256 invalide - installation annulee.' }
 
     Expand-Archive -Path $zip -DestinationPath $tmp -Force
     New-Item -ItemType Directory -Force -Path $installDir | Out-Null
@@ -40,13 +43,13 @@ try {
 }
 
 $exe = Join-Path $installDir 'pseudo-gateway.exe'
-Write-Host "Installé : $exe ($(& $exe --version))"
+Write-Host "Installe : $exe ($(& $exe --version))"
 if (($env:Path -split ';') -notcontains $installDir) {
-    Write-Host "Pour l'appeler depuis n'importe où, ajoutez $installDir à votre PATH."
+    Write-Host "Pour l'appeler depuis n'importe ou, ajoutez $installDir a votre PATH."
 }
 Write-Host @"
 
-Démarrage rapide (dans le dossier de votre choix) :
+Demarrage rapide (dans le dossier de votre choix) :
   & '$exe' gen-keys | Out-File -Encoding ascii .env
   & '$exe'            # API sur http://localhost:8080
 "@

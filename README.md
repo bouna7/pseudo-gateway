@@ -158,10 +158,10 @@ docker run -p 8080:8080 \
   pseudo-gateway
 ```
 
-### Sur Dokploy → `apirag.roostdrive.com`
+### Sur Dokploy
 
 1. **Application** dont la source est ce dépôt (build par le `Dockerfile`).
-2. **Domaine** `apirag.roostdrive.com` → port conteneur **8080**, HTTPS. Health
+2. **Domaine** (le vôtre) → port conteneur **8080**, HTTPS. Health
    check : `GET /health`.
 3. **Redis** : provisionner un service Redis avec persistance AOF, puis
    `VAULT_STORE=redis` + `REDIS_URL=redis://<host>:6379`.
@@ -195,22 +195,37 @@ docker run --rm ghcr.io/bouna7/pseudo-gateway gen-keys   # coller le résultat d
 docker compose up -d                                      # http://localhost:8080
 ```
 
-**Option 2 — binaire seul** (sans Docker ; coffre mémoire ou Redis existant) :
+**Option 2 — binaire seul** (sans Docker ; coffre mémoire ou Redis existant).
+Chaque système a **sa** commande : celle de Linux ne fonctionne pas dans
+PowerShell (`sh` n'y existe pas), et inversement.
+
+**Linux / macOS**, dans un terminal :
 
 ```bash
-# Linux / macOS
 curl -fsSL https://github.com/bouna7/pseudo-gateway/releases/latest/download/install.sh | sh
-pseudo-gateway gen-keys > .env && pseudo-gateway
+pseudo-gateway gen-keys > .env
+pseudo-gateway                      # http://localhost:8080
 ```
 
+**Windows**, dans PowerShell :
+
 ```powershell
-# Windows
 irm https://github.com/bouna7/pseudo-gateway/releases/latest/download/install.ps1 | iex
+& "$env:LOCALAPPDATA\pseudo-gateway\pseudo-gateway.exe" gen-keys | Out-File -Encoding ascii .env
+& "$env:LOCALAPPDATA\pseudo-gateway\pseudo-gateway.exe"
 ```
+
+> `Out-File -Encoding ascii` (et non `>`) : la redirection de PowerShell écrit en
+> UTF-16, que le lecteur de `.env` ne sait pas lire.
 
 Les scripts vérifient l'empreinte SHA-256 de l'archive. Le binaire lit sa
 configuration dans l'environnement ou dans un fichier `.env` du dossier courant
 (voir `.env.example`). `pseudo-gateway --help` liste les commandes.
+
+Par défaut, la documentation n'est pas publiée et la racine `/` ne répond rien :
+ajoutez `ENABLE_DOCS=true` au `.env` pour ouvrir `/docs` (`/` y redirige alors).
+Sans Redis ni Presidio, le service démarre quand même : coffre en mémoire et
+détection par regex seule (e-mail, téléphone, IBAN, carte), sans les noms.
 
 > Le dépôt et les paquets GHCR doivent être **publics** pour que ces URL
 > fonctionnent sans authentification (GitHub → Packages → *Change visibility*).
@@ -240,13 +255,13 @@ Les anciens chemins `/pseudonymize` et `/depseudonymize` restent servis.
 
 ```bash
 # Créer un compte (admin)
-curl -X POST https://apirag.roostdrive.com/admin/accounts \
+curl -X POST https://votre-domaine.exemple/admin/accounts \
   -H "X-Admin-Key: $ADMIN_API_KEY" -H 'Content-Type: application/json' \
   -d '{"name": "Acme", "email": "dev@acme.fr", "rate_per_min": 120, "monthly_quota": 50000}'
 # -> { "account": { "id": "acc_…", … }, "api_key": "pgw_…" }
 
 # Appel par le client, depuis n'importe quelle machine
-curl -X POST https://apirag.roostdrive.com/v1/pseudonymize \
+curl -X POST https://votre-domaine.exemple/v1/pseudonymize \
   -H "Authorization: Bearer pgw_…" -H 'Content-Type: application/json' \
   -d '{"text": "Écrire à marie.dupont@gmail.com"}'
 ```
