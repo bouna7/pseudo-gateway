@@ -139,6 +139,14 @@ pub fn router(state: AppState, cfg: &HttpConfig) -> Router {
         }
         let spec = Arc::new(spec);
         app = app
+            // Ouvrir la racine dans un navigateur donnait « endpoint inconnu »,
+            // ce qui laisse croire à un service cassé. Quand la documentation est
+            // publiée, `/` y mène ; sinon la racine reste muette (pas de
+            // divulgation sur une instance de production).
+            .route(
+                "/",
+                get(|| async { axum::response::Redirect::temporary("/docs") }),
+            )
             .route(
                 "/openapi.json",
                 get(move || {
@@ -348,5 +356,18 @@ mod tests {
         let (s, spec) = call(&app, "GET", "/openapi.json", None, json!({})).await;
         assert_eq!(s, StatusCode::OK);
         assert!(spec["paths"]["/v1/pseudonymize"].is_object());
+    }
+
+    /// La racine mène à la documentation quand elle est publiée, et ne dit rien
+    /// du tout sinon.
+    #[tokio::test]
+    async fn racine_mene_a_la_doc_seulement_si_activee() {
+        let (s, _) = call(&app(state(0)), "GET", "/", None, json!({})).await;
+        assert_eq!(s, StatusCode::TEMPORARY_REDIRECT);
+
+        let sans_docs = router(state(0), &HttpConfig::default());
+        let (s, e) = call(&sans_docs, "GET", "/", None, json!({})).await;
+        assert_eq!(s, StatusCode::NOT_FOUND);
+        assert_eq!(e["error"], "not_found");
     }
 }
