@@ -172,9 +172,29 @@ docker run -p 8080:8080 \
    - Rotation : ajouter `PSEUDO_KEY_2`, passer `PSEUDO_CURRENT_KEY_ID=2`, redéployer.
 5. **CACHEBUST** : bumper l'`ARG CACHEBUST` du `Dockerfile` pour forcer un rebuild.
 
-> ⚠️ `/depseudonymize` restitue des données réelles : **ne jamais exposer la
-> passerelle sans `GATEWAY_API_KEY`** (ou la garder sur réseau privé). `/health`
-> et `/` restent ouverts pour les sondes.
+### Checklist de mise en production
+
+`/depseudonymize` restitue des **données réelles** : une instance ouverte est une
+fuite, pas un mode dégradé. Le service refuse d'ailleurs de démarrer sans aucune
+clé (`ALLOW_INSECURE=true` pour passer outre en local).
+
+| # | À vérifier | Pourquoi |
+|---|---|---|
+| 1 | `PSEUDO_KEY_1` **et** `PSEUDO_INDEX_KEY` définies | Sans elles, une clé de DEV éphémère est tirée : tous les jetons deviennent illisibles au redémarrage |
+| 2 | `GATEWAY_API_KEY` (vos services) **et/ou** `ADMIN_API_KEY` (clients externes) | Sans clé, n'importe qui restitue les valeurs réelles |
+| 3 | `PUBLIC_SIGNUP=false` | Sinon n'importe qui crée des comptes. Créez-les via `/admin/accounts` |
+| 4 | `VAULT_STORE=redis` avec persistance AOF | En mémoire, le coffre est perdu au redémarrage |
+| 5 | HTTPS, et `TRUST_PROXY=true` derrière Traefik / nginx | Les clés circuleraient en clair ; et les limites par IP se tromperaient de client |
+| 6 | `/admin/*` réservé à votre réseau, ou `ADMIN_API_KEY` longue et tournée régulièrement | Ces routes créent des comptes et des clés |
+| 7 | `ENABLE_DOCS` selon que vous publiez ou non votre documentation | Par défaut la doc est fermée et `/` ne répond rien |
+| 8 | Sauvegarde de Redis **et** des clés de chiffrement | Les blobs sans leur clé sont irrécupérables |
+
+La clé interne `GATEWAY_API_KEY` est une **clé maîtresse** : elle choisit
+librement son `tenant_id` et lit donc les jetons de n'importe quel compte. Elle
+est faite pour vos propres services — ne la donnez jamais à un client externe,
+donnez-lui une clé de compte `pgw_…`.
+
+`/health` reste ouvert pour les sondes.
 
 ## Installer partout (Linux, Windows, macOS — x86_64 et ARM64)
 
