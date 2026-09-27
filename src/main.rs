@@ -58,6 +58,29 @@ fn env_flag(name: &str) -> bool {
     env_opt(name).is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
 }
 
+/// Refuse de démarrer sans aucune clé : `/depseudonymize` restitue des données
+/// réelles, une instance ouverte est donc une fuite, pas un mode dégradé. Un
+/// avertissement dans les logs ne suffit pas — il passe inaperçu à un déploiement
+/// où l'on a simplement oublié les variables d'environnement.
+///
+/// Renvoie `Ok(true)` quand l'instance démarre délibérément sans protection.
+fn auth_guard(
+    has_gateway_key: bool,
+    has_admin_key: bool,
+    allow_insecure: bool,
+) -> Result<bool, &'static str> {
+    if has_gateway_key || has_admin_key {
+        return Ok(false);
+    }
+    if allow_insecure {
+        return Ok(true);
+    }
+    Err("aucune clé d'authentification. Définissez GATEWAY_API_KEY (vos propres \
+         services) et/ou ADMIN_API_KEY (API publique : comptes, clés, quotas). \
+         Pour un usage LOCAL sans protection, ALLOW_INSECURE=true. \
+         Générer des secrets : pseudo-gateway gen-keys")
+}
+
 fn fail(msg: &str, err: impl std::fmt::Display) -> ! {
     tracing::error!(error = %err, "{msg} — arrêt");
     std::process::exit(1);
@@ -123,6 +146,21 @@ fn run_command() -> bool {
             eprintln!("commande inconnue : {other}\n\n{HELP}");
             std::process::exit(2);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::auth_guard;
+
+    #[test]
+    fn refuse_de_demarrer_sans_cle() {
+        // Une clé suffit : interne, ou admin (API publique).
+        assert_eq!(auth_guard(true, false, false), Ok(false));
+        assert_eq!(auth_guard(false, true, false), Ok(false));
+        // Aucune clé : refus, sauf accord explicite (et l'avertissement suit).
+        assert!(auth_guard(false, false, false).is_err());
+        assert_eq!(auth_guard(false, false, true), Ok(true));
     }
 }
 
@@ -205,10 +243,13 @@ async fn main() {
     if api_key.is_some() {
         tracing::info!("clé d'API interne activée (X-Api-Key / Bearer)");
     }
-    if api_key.is_none() && accounts.is_none() {
-        tracing::warn!(
-            "ni GATEWAY_API_KEY ni ADMIN_API_KEY — endpoints NON protégés (dev uniquement)"
-        );
+    match auth_guard(api_key.is_some(), admin_key.is_some(), env_flag("ALLOW_INSECURE")) {
+        Ok(true) => tracing::warn!(
+            "ALLOW_INSECURE=true — endpoints NON protégés : /depseudonymize rend \
+             des données réelles à quiconque atteint ce port"
+        ),
+        Ok(false) => {}
+        Err(msg) => fail("démarrage refusé", msg),
     }
 
     let trust_proxy = env_flag("TRUST_PROXY");
