@@ -160,17 +160,54 @@ docker run -p 8080:8080 \
 
 ### Sur Dokploy
 
-1. **Application** dont la source est ce dépôt (build par le `Dockerfile`).
-2. **Domaine** (le vôtre) → port conteneur **8080**, HTTPS. Health
-   check : `GET /health`.
-3. **Redis** : provisionner un service Redis avec persistance AOF, puis
-   `VAULT_STORE=redis` + `REDIS_URL=redis://<host>:6379`.
-4. **Secrets (variables d'env, jamais committés)** :
-   - `PSEUDO_KEY_1` (32 octets hex) — clé de chiffrement courante,
-   - `PSEUDO_INDEX_KEY` (32 octets hex) — clé d'index **stable**,
-   - `GATEWAY_API_KEY` — partagé avec `files_service` (en-tête `X-Api-Key`).
-   - Rotation : ajouter `PSEUDO_KEY_2`, passer `PSEUDO_CURRENT_KEY_ID=2`, redéployer.
-5. **CACHEBUST** : bumper l'`ARG CACHEBUST` du `Dockerfile` pour forcer un rebuild.
+Créer un service de type **Compose** (et non Application : la pile compte trois
+conteneurs qui se parlent). Deux fichiers au choix :
+
+| Fichier | Déploiement | Quand |
+|---|---|---|
+| `docker-compose.images.yml` | Télécharge les images publiées (quelques secondes) | **Recommandé** : vous déployez exactement ce qui a été testé, et `PGW_VERSION` permet de revenir en arrière |
+| `docker-compose.yml` | Compile depuis les sources (plusieurs minutes) | Pour déployer une branche non publiée |
+
+1. **Service Compose** dont la source est ce dépôt, en indiquant le fichier choisi.
+2. **Onglet Domains** : votre domaine → service **`gateway`**, port **8080**,
+   HTTPS. Health check : `GET /health`. Aucun port n'est publié sur l'hôte :
+   Traefik joint le conteneur par le réseau interne du compose.
+3. **Onglet Environment** : coller le bloc ci-dessous. Redis et Presidio font
+   partie de la pile, rien à provisionner à côté ; `VAULT_STORE`, `REDIS_URL`,
+   `PRESIDIO_URL` et `TRUST_PROXY` sont déjà fixés par le compose.
+
+```bash
+# Chiffrement — `pseudo-gateway gen-keys` les génère (obligatoire)
+PSEUDO_KEY_1=<hex64>
+PSEUDO_CURRENT_KEY_ID=1
+PSEUDO_INDEX_KEY=<hex64>
+
+# Authentification — au moins une, sinon le service refuse de démarrer
+GATEWAY_API_KEY=<secret>        # vos propres services (clé MAÎTRESSE)
+ADMIN_API_KEY=<secret>          # API publique : comptes, clés, quotas
+
+# API publique
+PUBLIC_SIGNUP=false
+DEFAULT_RATE_PER_MIN=60
+DEFAULT_MONTHLY_QUOTA=10000
+
+# HTTP
+ENABLE_DOCS=false
+PUBLIC_BASE_URL=https://votre-domaine.exemple
+CORS_ALLOWED_ORIGINS=           # domaines des sites appelant depuis un navigateur
+
+# Version déployée (docker-compose.images.yml uniquement)
+PGW_VERSION=0.2.1
+```
+
+4. **Mise à jour** : changer `PGW_VERSION` et redéployer (ou bumper l'`ARG
+   CACHEBUST` du `Dockerfile` si vous compilez depuis les sources).
+5. **Rotation de clé** : ajouter `PSEUDO_KEY_2`, passer `PSEUDO_CURRENT_KEY_ID=2`,
+   redéployer. Les anciens blobs restent déchiffrables tant que `PSEUDO_KEY_1`
+   est présente ; `PSEUDO_INDEX_KEY`, elle, ne change **jamais**.
+
+> Sauvegardez `PSEUDO_KEY_1` et `PSEUDO_INDEX_KEY` hors du serveur : sans elles,
+> le contenu de Redis est définitivement irrécupérable.
 
 ### Checklist de mise en production
 

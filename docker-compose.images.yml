@@ -1,0 +1,77 @@
+# Même pile que `docker-compose.yml`, mais à partir des IMAGES PUBLIÉES au lieu
+# des sources. Le déploiement ne compile plus rien : il télécharge exactement ce
+# qui a été construit et testé par le workflow de release.
+#
+# À utiliser dans Dokploy (service de type Compose) en indiquant ce fichier
+# plutôt que `docker-compose.yml`. Même règle : AUCUN port publié sur l'hôte,
+# le proxy Dokploy route le domaine vers le port interne 8080 du service
+# `gateway` (onglet « Domains »).
+#
+# Mise à jour = changer PGW_VERSION (onglet « Environment ») et redéployer.
+# Épingler une version, plutôt que `latest`, garde les redéploiements
+# reproductibles et permet de revenir en arrière en une variable.
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - pseudo-redis-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # NER (noms, lieux, organisations) : modèle FRANÇAIS embarqué dans l'image.
+  # Tourne dans votre périmètre, aucune donnée ne sort. ~2 Go de RAM, 30-60 s
+  # de chargement au premier démarrage.
+  presidio:
+    image: ghcr.io/bouna7/pseudo-gateway-presidio:${PGW_VERSION:-0.2.1}
+    restart: unless-stopped
+    environment:
+      # Sans marge, le chargement du modèle spaCy depasse le délai par défaut du
+      # worker gunicorn : le port est ouvert mais aucune requête n'est servie.
+      GUNICORN_CMD_ARGS: "--timeout 300"
+
+  gateway:
+    image: ghcr.io/bouna7/pseudo-gateway:${PGW_VERSION:-0.2.1}
+    environment:
+      # Imposé par cette pile : les trois services se parlent par le réseau interne.
+      VAULT_STORE: redis
+      REDIS_URL: redis://redis:6379
+      PRESIDIO_URL: http://presidio:3000
+      PRESIDIO_LANG: fr
+      # Derrière Traefik (Dokploy) : l'IP client vient de X-Forwarded-For.
+      TRUST_PROXY: "true"
+      RUST_LOG: info
+      # ─── À définir dans l'onglet « Environment » de Dokploy ───────────────
+      # Chiffrement (obligatoire) : `pseudo-gateway gen-keys` les génère.
+      PSEUDO_KEY_1: ${PSEUDO_KEY_1:-}
+      PSEUDO_CURRENT_KEY_ID: ${PSEUDO_CURRENT_KEY_ID:-1}
+      PSEUDO_INDEX_KEY: ${PSEUDO_INDEX_KEY:-}
+      # Authentification : au moins une des deux, sinon le service refuse de
+      # démarrer (/depseudonymize restitue des données réelles).
+      GATEWAY_API_KEY: ${GATEWAY_API_KEY:-}
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-}
+      # API publique (comptes, clés, quotas) : active si ADMIN_API_KEY est définie.
+      PUBLIC_SIGNUP: ${PUBLIC_SIGNUP:-false}
+      DEFAULT_RATE_PER_MIN: ${DEFAULT_RATE_PER_MIN:-60}
+      DEFAULT_MONTHLY_QUOTA: ${DEFAULT_MONTHLY_QUOTA:-10000}
+      # HTTP.
+      ENABLE_DOCS: ${ENABLE_DOCS:-false}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
+    expose:
+      - "8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+      # service_started (PAS service_healthy) : le NER est best effort, le
+      # gateway ne doit JAMAIS être bloqué au démarrage par Presidio.
+      presidio:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  pseudo-redis-data:
