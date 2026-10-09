@@ -24,10 +24,20 @@ type HmacSha256 = Hmac<Sha256>;
 /// Erreurs de chargement / format de clé.
 #[derive(Debug, Error)]
 pub enum KeyError {
-    #[error("clé non hexadécimale")]
-    NotHex,
-    #[error("clé de {0} octets au lieu de 32")]
-    WrongLength(usize),
+    #[error("{var} : clé non hexadécimale (attendu 64 caractères parmi 0-9 a-f)")]
+    NotHex { var: String },
+    /// Confusion fréquente : « 32 octets » s'écrit avec **64** caractères hex.
+    /// `openssl rand -hex 64` en produit 128 — d'où ce message qui donne les deux
+    /// unités et la commande qui ne peut pas se tromper.
+    #[error(
+        "{var} : clé de {bytes} octets, attendu 32 — soit 64 caractères \
+         hexadécimaux, {chars} fournis. Générer : pseudo-gateway gen-keys"
+    )]
+    WrongLength {
+        var: String,
+        bytes: usize,
+        chars: usize,
+    },
     #[error("configuration de clé invalide : {0}")]
     Invalid(String),
 }
@@ -135,10 +145,19 @@ impl KeyProvider for EnvKeyProvider {
     }
 }
 
-fn parse_hex32(hex_str: &str) -> Result<[u8; 32], KeyError> {
-    let bytes = hex::decode(hex_str.trim()).map_err(|_| KeyError::NotHex)?;
+/// `var` nomme la variable d'environnement fautive : sans elle, l'exploitant
+/// doit deviner laquelle des trois clés est en cause.
+fn parse_hex32(var: &str, hex_str: &str) -> Result<[u8; 32], KeyError> {
+    let hex_str = hex_str.trim();
+    let bytes = hex::decode(hex_str).map_err(|_| KeyError::NotHex {
+        var: var.to_string(),
+    })?;
     if bytes.len() != 32 {
-        return Err(KeyError::WrongLength(bytes.len()));
+        return Err(KeyError::WrongLength {
+            var: var.to_string(),
+            bytes: bytes.len(),
+            chars: hex_str.len(),
+        });
     }
     let mut key = [0u8; 32];
     key.copy_from_slice(&bytes);
@@ -164,7 +183,7 @@ fn load_from_env() -> Result<Keyring, KeyError> {
                 if value.trim().is_empty() {
                     continue; // variable injectée vide (ex. ${PSEUDO_KEY_2:-}) → ignorée
                 }
-                raw.insert(id, parse_hex32(&value)?);
+                raw.insert(id, parse_hex32(&name, &value)?);
             }
         }
     }
@@ -184,7 +203,7 @@ fn load_from_env() -> Result<Keyring, KeyError> {
         }
 
         let index_key = match env_opt("PSEUDO_INDEX_KEY") {
-            Some(h) => parse_hex32(&h)?,
+            Some(h) => parse_hex32("PSEUDO_INDEX_KEY", &h)?,
             None => {
                 let anchor_id = *raw.keys().next().expect("raw non vide");
                 tracing::warn!(
@@ -207,7 +226,7 @@ fn load_from_env() -> Result<Keyring, KeyError> {
 
     // Repli : clé unique MASTER_KEY, ou clé de DEV éphémère.
     match env_opt("MASTER_KEY") {
-        Some(h) => Ok(Keyring::from_master(&parse_hex32(&h)?)),
+        Some(h) => Ok(Keyring::from_master(&parse_hex32("MASTER_KEY", &h)?)),
         None => {
             tracing::warn!(
                 "aucune clé configurée (PSEUDO_KEY_* / MASTER_KEY) — clé de DEV éphémère, NON sûre"
@@ -281,8 +300,13 @@ mod tests {
 
     #[test]
     fn parse_hex32_valide_et_invalide() {
-        assert!(parse_hex32(&"ab".repeat(32)).is_ok());
-        assert!(matches!(parse_hex32("zz"), Err(KeyError::NotHex)));
-        assert!(matches!(parse_hex32("abcd"), Err(KeyError::WrongLength(2))));
+        assert!(parse_hex32("PSEUDO_KEY_1", &"ab".repeat(32)).is_ok());
+        assert!(matches!(parse_hex32("PSEUDO_KEY_1", "zz"), Err(KeyError::NotHex { .. })));
+                // Le cas vecu : `openssl rand -hex 64` donne 128 caracteres, soit 64 octets.
+        let err = parse_hex32("PSEUDO_KEY_1", &"ab".repeat(64)).unwrap_err().to_string();
+        assert!(err.contains("PSEUDO_KEY_1"), "{err}");
+        assert!(err.contains("64 caractères hexadécimaux"), "{err}");
+        assert!(err.contains("128 fournis"), "{err}");
+        assert!(err.contains("gen-keys"), "{err}");
     }
 }

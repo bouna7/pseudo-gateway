@@ -29,7 +29,7 @@ détient la correspondance `jeton ↔ valeur réelle`, chiffrée en AES-256-GCM.
 Pré-requis : [Rust stable](https://rustup.rs) (`cargo`).
 
 ```bash
-# 1. Générer une clé maître (32 octets hex) et la placer dans l'environnement
+# 1. Générer une clé maître (32 octets = 64 caractères hex) et la placer dans l'environnement
 export MASTER_KEY=$(openssl rand -hex 32)
 
 # 2. Démarrer le service (port 8080)
@@ -133,7 +133,7 @@ le modèle français, voir `integrations/ner/`).
 
 ## Schéma de clés
 
-- Clés AES-256 = 32 octets hex. Mode versionné `PSEUDO_KEY_<id>` (rotation), ou
+- Clés AES-256 = 32 octets, écrits en **64 caractères hexadécimaux** (`openssl rand -hex 32`, et non `-hex 64` qui en produirait 128). Mode versionné `PSEUDO_KEY_<id>` (rotation), ou
   `MASTER_KEY` unique en repli ; chargées par un `KeyProvider` (Env → Vault/KMS demain).
 - Un **nonce de 96 bits neuf par valeur** chiffrée (jamais réutilisé).
 - Blob stocké = `key_id(4) || nonce(12) || ciphertext` ; le `key_id` rend le blob
@@ -153,10 +153,15 @@ Image construite par le `Dockerfile` (build Rust release multi-stage → image
 docker build -t pseudo-gateway .
 docker run -p 8080:8080 \
   -e VAULT_STORE=redis -e REDIS_URL=redis://redis:6379 \
-  -e PSEUDO_KEY_1=<hex64> -e PSEUDO_INDEX_KEY=<hex64> \
-  -e GATEWAY_API_KEY=<secret> \
+  -e PSEUDO_KEY_1="$(openssl rand -hex 32)" \
+  -e PSEUDO_INDEX_KEY="$(openssl rand -hex 32)" \
+  -e GATEWAY_API_KEY="$(openssl rand -hex 24)" \
   pseudo-gateway
 ```
+
+> `-hex 32` donne 32 octets, soit les **64 caractères** attendus. Les clés tirées
+> ainsi ne vivent que le temps du conteneur : pour un vrai déploiement, générez-les
+> une fois (`pseudo-gateway gen-keys`) et conservez-les.
 
 ### Sur Dokploy
 
@@ -178,9 +183,9 @@ conteneurs qui se parlent). Deux fichiers au choix :
 
 ```bash
 # Chiffrement — `pseudo-gateway gen-keys` les génère (obligatoire)
-PSEUDO_KEY_1=<hex64>
+PSEUDO_KEY_1=<64 caractères hex>
 PSEUDO_CURRENT_KEY_ID=1
-PSEUDO_INDEX_KEY=<hex64>
+PSEUDO_INDEX_KEY=<64 caractères hex>
 
 # Authentification — au moins une, sinon le service refuse de démarrer
 GATEWAY_API_KEY=<secret>        # vos propres services (clé MAÎTRESSE)
@@ -197,7 +202,7 @@ PUBLIC_BASE_URL=https://votre-domaine.exemple
 CORS_ALLOWED_ORIGINS=           # domaines des sites appelant depuis un navigateur
 
 # Version déployée (docker-compose.images.yml uniquement)
-PGW_VERSION=0.2.1
+PGW_VERSION=0.2.2
 ```
 
 4. **Mise à jour** : changer `PGW_VERSION` et redéployer (ou bumper l'`ARG
