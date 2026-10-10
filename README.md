@@ -202,7 +202,7 @@ PUBLIC_BASE_URL=https://votre-domaine.exemple
 CORS_ALLOWED_ORIGINS=           # domaines des sites appelant depuis un navigateur
 
 # Version déployée (docker-compose.images.yml uniquement)
-PGW_VERSION=0.2.7
+PGW_VERSION=0.3.0
 ```
 
 4. **Mise à jour** : changer `PGW_VERSION` et redéployer (ou bumper l'`ARG
@@ -312,16 +312,20 @@ librement son `tenant_id`, comme avant. Ne la donnez jamais à un tiers.
 | `GET /admin/ui` | — (la page demande la clé) | **Console** : créer des comptes et des clés depuis un navigateur (`ENABLE_ADMIN_UI=true`) |
 | `POST/GET /admin/accounts`, `GET/PATCH /admin/accounts/{id}` | `X-Admin-Key` | Créer, lister, modifier, désactiver |
 | `POST /admin/accounts/{id}/keys`, `DELETE …/keys/{key_id}` | `X-Admin-Key` | Rotation / révocation de clé |
+| `POST/GET /admin/invitations`, `DELETE /admin/invitations/{code}` | `X-Admin-Key` | Liens d'invitation : créer, suivre, révoquer |
 
 **Comment vos clients obtiennent leur clé**, au choix :
 
 - **Vous la créez** dans la console `/admin/ui` et vous la leur envoyez. Contrôle
   total, mais vous êtes dans la boucle à chaque nouvel utilisateur.
-- **Ils s'inscrivent eux-mêmes** sur `/signup` (`PUBLIC_SIGNUP=true`) en saisissant
-  un **code d'invitation** que vous leur avez communiqué (`SIGNUP_INVITE_CODE`).
-  Ils n'ont alors besoin ni de vous, ni de votre clé d'administration — et le
-  code empêche que n'importe qui crée des comptes. Sans code configuré,
-  l'inscription est ouverte à quiconque connaît l'adresse : à éviter en public.
+- **Vous leur envoyez un lien d'invitation**, créé dans la console (section
+  *Invitations*) : un libellé, un nombre d'utilisations (1 par défaut), une durée
+  de validité, et vous obtenez `https://votre-domaine/signup?invite=inv_…`.
+  L'invité clique, se présente, repart avec sa clé — sans votre clé
+  d'administration et sans rien recopier. La console montre la consommation de
+  chaque invitation et permet de la révoquer sur-le-champ.
+  Nécessite `PUBLIC_SIGNUP=true` ; `SIGNUP_REQUIRE_INVITE=false` ouvrirait
+  l'inscription à quiconque connaît l'adresse, ce qui est déconseillé en public.
 
 La clé se passe en `X-Api-Key: <clé>` **ou** `Authorization: Bearer <clé>`.
 Dépassements : `429` avec `Retry-After` (`rate_limited`) ou `quota_exceeded`.
