@@ -27,7 +27,7 @@ services:
   # Tourne dans votre périmètre, aucune donnée ne sort. ~2 Go de RAM, 30-60 s
   # de chargement au premier démarrage.
   presidio:
-    image: ghcr.io/bouna7/pseudo-gateway-presidio:${PGW_VERSION:-0.2.3}
+    image: ghcr.io/bouna7/pseudo-gateway-presidio:${PGW_VERSION:-0.2.4}
     restart: unless-stopped
     environment:
       # Sans marge, le chargement du modèle spaCy depasse le délai par défaut du
@@ -35,7 +35,7 @@ services:
       GUNICORN_CMD_ARGS: "--timeout 300"
 
   gateway:
-    image: ghcr.io/bouna7/pseudo-gateway:${PGW_VERSION:-0.2.3}
+    image: ghcr.io/bouna7/pseudo-gateway:${PGW_VERSION:-0.2.4}
     environment:
       # Imposé par cette pile : les trois services se parlent par le réseau interne.
       VAULT_STORE: redis
