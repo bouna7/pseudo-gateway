@@ -308,6 +308,7 @@ librement son `tenant_id`, comme avant. Ne la donnez jamais à un tiers.
 | `POST /v1/pseudonymize`, `POST /v1/depseudonymize` | clé compte ou interne | Décomptés (limite/minute + quota mensuel) |
 | `GET /v1/me` | clé compte | Compte + consommation du mois (non décompté) |
 | `POST /v1/signup` | aucune | Inscription libre si `PUBLIC_SIGNUP=true` (limitée par IP) |
+| `GET /admin/ui` | — (la page demande la clé) | **Console** : créer des comptes et des clés depuis un navigateur (`ENABLE_ADMIN_UI=true`) |
 | `POST/GET /admin/accounts`, `GET/PATCH /admin/accounts/{id}` | `X-Admin-Key` | Créer, lister, modifier, désactiver |
 | `POST /admin/accounts/{id}/keys`, `DELETE …/keys/{key_id}` | `X-Admin-Key` | Rotation / révocation de clé |
 

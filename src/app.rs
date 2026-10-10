@@ -43,6 +43,8 @@ pub struct HttpConfig {
     /// `None` = pas d'en-têtes CORS ; `Some(vec!["*"])` = toutes origines.
     pub cors_origins: Option<Vec<String>>,
     pub docs: bool,
+    /// Console d'administration sur `/admin/ui` (création de comptes et de clés).
+    pub admin_ui: bool,
     /// URL publique annoncée dans la spec OpenAPI (ex. https://api.exemple.fr).
     pub public_base_url: Option<String>,
 }
@@ -54,6 +56,7 @@ impl Default for HttpConfig {
             request_timeout: Duration::from_secs(30),
             cors_origins: None,
             docs: false,
+            admin_ui: false,
             public_base_url: None,
         }
     }
@@ -129,6 +132,18 @@ pub fn router(state: AppState, cfg: &HttpConfig) -> Router {
             .route("/admin/accounts/:id/keys/:key_id", delete(admin::revoke_key))
             .route_layer(from_fn_with_state(state.clone(), auth::require_admin));
         app = app.merge(admin_routes);
+
+        if cfg.admin_ui {
+            // La page elle-même ne contient aucun secret : un navigateur ne peut
+            // pas envoyer d'en-tête sur une simple navigation. C'est le script
+            // qui réclame la clé d'administration puis appelle /admin/*, lesquels
+            // restent protégés. Désactivée par défaut : son existence seule
+            // signalerait qu'une console d'administration est présente.
+            app = app.route(
+                "/admin/ui",
+                get(|| async { axum::response::Html(include_str!("console.html")) }),
+            );
+        }
     }
 
     if cfg.docs {
@@ -409,6 +424,51 @@ mod tests {
         assert!(spec["paths"]["/v1/signup"].is_null());
         assert!(spec["paths"]["/admin/accounts"].is_null());
         assert!(spec["paths"]["/v1/pseudonymize"].is_object());
+    }
+
+    /// La console n'est servie que si on l'a demandée, et seulement là où
+    /// l'administration existe.
+    #[tokio::test]
+    async fn console_admin_sur_demande_seulement() {
+        let (s, _) = call(&app(state(0)), "GET", "/admin/ui", None, json!({})).await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "désactivée par défaut");
+
+        let avec = router(
+            state(0),
+            &HttpConfig {
+                admin_ui: true,
+                ..Default::default()
+            },
+        );
+        let resp = avec
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/ui")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let page = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let page = String::from_utf8(page.to_vec()).unwrap();
+        assert!(page.contains("Console d'administration"));
+        // La page est publique : elle ne doit contenir aucun secret.
+        assert!(!page.contains("admin-demo"), "aucune clé en dur");
+
+        // Sans ADMIN_API_KEY, l'administration n'existe pas : la console non plus.
+        let mut st = state(0);
+        st.admin_key = None;
+        let sans_admin = router(
+            st,
+            &HttpConfig {
+                admin_ui: true,
+                ..Default::default()
+            },
+        );
+        let (s, _) = call(&sans_admin, "GET", "/admin/ui", None, json!({})).await;
+        assert_eq!(s, StatusCode::NOT_FOUND);
     }
 
     /// La racine mène à la documentation quand elle est publiée, et ne dit rien

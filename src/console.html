@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Console — pseudo-gateway</title>
+<style>
+  :root { color-scheme: light dark; --bord: #d9dce1; --fond2: #f6f7f9; --texte2: #5b6472;
+          --accent: #1f6feb; --danger: #c0392b; --ok: #1a7f37; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bord: #30363d; --fond2: #161b22; --texte2: #9aa4b2; --accent: #4493f8; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .page { max-width: 880px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 17px; margin: 32px 0 12px; }
+  p.sous { color: var(--texte2); margin: 0 0 24px; }
+  fieldset { border: 1px solid var(--bord); border-radius: 10px; padding: 16px; margin: 0 0 20px; }
+  legend { padding: 0 6px; color: var(--texte2); font-size: 13px; }
+  label { display: block; font-size: 13px; color: var(--texte2); margin: 10px 0 4px; }
+  input, select { width: 100%; padding: 9px 10px; border: 1px solid var(--bord); border-radius: 8px;
+                  background: transparent; color: inherit; font: inherit; }
+  .ligne { display: flex; gap: 12px; flex-wrap: wrap; }
+  .ligne > div { flex: 1 1 180px; }
+  button { padding: 9px 14px; border-radius: 8px; border: 1px solid var(--bord);
+           background: var(--fond2); color: inherit; font: inherit; cursor: pointer; }
+  button.principal { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.lien { background: none; border: none; color: var(--accent); padding: 4px 6px; }
+  button.danger { color: var(--danger); }
+  button:disabled { opacity: .5; cursor: progress; }
+  .actions { margin-top: 16px; display: flex; gap: 8px; align-items: center; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 9px 8px; border-bottom: 1px solid var(--bord); vertical-align: top; }
+  th { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--texte2); }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 13px; }
+  .msg { padding: 10px 12px; border-radius: 8px; margin: 12px 0; display: none; }
+  .msg.err { display: block; background: #fdeaea; color: #8a1f1f; }
+  .msg.info { display: block; background: #eaf3ff; color: #14509c; }
+  @media (prefers-color-scheme: dark) {
+    .msg.err { background: #3a1413; color: #ffb4ab; }
+    .msg.info { background: #11263f; color: #a8cbff; }
+  }
+  .cle { border: 2px solid var(--ok); border-radius: 10px; padding: 14px; margin: 16px 0; }
+  .cle p { margin: 0 0 8px; color: var(--texte2); font-size: 13px; }
+  .cle .valeur { display: flex; gap: 8px; align-items: center; }
+  .cle input { font-family: ui-monospace, monospace; }
+  .badge { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--fond2); }
+  .badge.off { background: #fdeaea; color: #8a1f1f; }
+  .vide { color: var(--texte2); font-style: italic; }
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>Console d'administration</h1>
+  <p class="sous">Créer des comptes et des clés d'API pour vos clients, sans ligne de commande.</p>
+
+  <div id="msg" class="msg"></div>
+
+  <!-- ── Connexion ─────────────────────────────────────────────────────── -->
+  <section id="connexion">
+    <fieldset>
+      <legend>Clé d'administration</legend>
+      <label for="admin">Valeur de <code>ADMIN_API_KEY</code></label>
+      <input id="admin" type="password" autocomplete="off" placeholder="collez votre clé d'administration">
+      <div class="actions">
+        <button class="principal" id="btn-connexion">Se connecter</button>
+        <span class="sous" style="margin:0">Gardée seulement dans cet onglet, jamais enregistrée.</span>
+      </div>
+    </fieldset>
+  </section>
+
+  <!-- ── Espace de travail ─────────────────────────────────────────────── -->
+  <section id="travail" hidden>
+    <fieldset>
+      <legend>Nouveau compte</legend>
+      <label for="nom">Nom du client</label>
+      <input id="nom" placeholder="Cabinet Durand">
+      <div class="ligne">
+        <div>
+          <label for="email">E-mail (facultatif)</label>
+          <input id="email" type="email" placeholder="contact@exemple.fr">
+        </div>
+        <div>
+          <label for="rate">Requêtes par minute (0 = illimité)</label>
+          <input id="rate" type="number" min="0" value="60">
+        </div>
+        <div>
+          <label for="quota">Requêtes par mois (0 = illimité)</label>
+          <input id="quota" type="number" min="0" value="10000">
+        </div>
+      </div>
+      <div class="actions">
+        <button class="principal" id="btn-creer">Créer le compte et sa clé</button>
+      </div>
+    </fieldset>
+
+    <div id="nouvelle-cle"></div>
+
+    <h2>Comptes</h2>
+    <div id="comptes"><p class="vide">Chargement…</p></div>
+  </section>
+</div>
+
+<script>
+(() => {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const msg = $("msg");
+  let cleAdmin = sessionStorage.getItem("pgw_admin") || "";
+
+  const afficher = (texte, type = "err") => {
+    msg.textContent = texte;
+    msg.className = "msg " + type;
+  };
+  const effacer = () => { msg.className = "msg"; msg.textContent = ""; };
+
+  // Toutes les écritures passent par textContent : les noms de comptes sont
+  // saisis par un humain, on ne les réinjecte jamais comme du HTML.
+  const el = (balise, texte, classe) => {
+    const n = document.createElement(balise);
+    if (texte !== undefined) n.textContent = texte;
+    if (classe) n.className = classe;
+    return n;
+  };
+
+  async function api(methode, chemin, corps) {
+    const options = { method: methode, headers: { "X-Admin-Key": cleAdmin } };
+    if (corps !== undefined) {
+      options.headers["Content-Type"] = "application/json; charset=utf-8";
+      options.body = JSON.stringify(corps);
+    }
+    const r = await fetch(chemin, options);
+    const texte = await r.text();
+    let donnees = null;
+    try { donnees = texte ? JSON.parse(texte) : null; } catch { /* corps non JSON */ }
+    if (!r.ok) {
+      throw new Error(donnees && donnees.message ? donnees.message : `${r.status} ${texte}`);
+    }
+    return donnees;
+  }
+
+  // `creation` distingue les deux cas : un compte tout neuf, ou une clé
+  // supplémentaire sur un compte existant (rotation).
+  function montrerCle(compte, cle, creation) {
+    const boite = el("div", undefined, "cle");
+    const intro = creation
+      ? `Compte « ${compte.name} » (${compte.id}) créé.`
+      : `Nouvelle clé pour « ${compte.name} » (${compte.id}). L'ancienne fonctionne encore : révoquez-la une fois le remplacement déployé.`;
+    boite.appendChild(el("p", `${intro} Cette clé ne sera plus jamais affichée : copiez-la maintenant.`));
+    const ligne = el("div", undefined, "valeur");
+    const champ = document.createElement("input");
+    champ.readOnly = true;
+    champ.value = cle;
+    const copier = el("button", "Copier", "principal");
+    copier.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(cle);
+        copier.textContent = "Copié";
+      } catch {
+        champ.select(); // presse-papiers refusé (http://, permissions) : sélection manuelle
+        copier.textContent = "Ctrl+C";
+      }
+      setTimeout(() => (copier.textContent = "Copier"), 2000);
+    };
+    ligne.append(champ, copier);
+    boite.appendChild(ligne);
+    $("nouvelle-cle").prepend(boite);
+  }
+
+  function lignesCompte(compte) {
+    const tr = el("tr");
+    const nom = el("td");
+    nom.appendChild(el("div", compte.name));
+    nom.appendChild(el("div", compte.id, "mono sous"));
+    tr.appendChild(nom);
+
+    const limites = el("td");
+    limites.appendChild(el("div", `${compte.rate_per_min || "∞"} / min`));
+    limites.appendChild(el("div", `${compte.monthly_quota || "∞"} / mois`));
+    tr.appendChild(limites);
+
+    const cles = el("td");
+    if (!compte.keys.length) {
+      cles.appendChild(el("span", "aucune clé active", "vide"));
+    }
+    compte.keys.forEach((k) => {
+      const l = el("div");
+      l.appendChild(el("span", k.key_id, "mono"));
+      const rev = el("button", "révoquer", "lien danger");
+      rev.onclick = () => agir(rev, () => api("DELETE", `/admin/accounts/${compte.id}/keys/${k.key_id}`));
+      l.appendChild(rev);
+      cles.appendChild(l);
+    });
+    tr.appendChild(cles);
+
+    const etat = el("td");
+    etat.appendChild(el("span", compte.disabled ? "désactivé" : "actif", compte.disabled ? "badge off" : "badge"));
+    tr.appendChild(etat);
+
+    const actions = el("td");
+    const nouvelle = el("button", "Nouvelle clé", "lien");
+    nouvelle.onclick = () => agir(nouvelle, async () => {
+      const r = await api("POST", `/admin/accounts/${compte.id}/keys`);
+      montrerCle(r.account, r.api_key, false);
+    });
+    const bascule = el("button", compte.disabled ? "Réactiver" : "Désactiver", "lien");
+    bascule.onclick = () => agir(bascule, () =>
+      api("PATCH", `/admin/accounts/${compte.id}`, { disabled: !compte.disabled }));
+    actions.append(nouvelle, bascule);
+    tr.appendChild(actions);
+    return tr;
+  }
+
+  async function charger() {
+    const comptes = await api("GET", "/admin/accounts");
+    const cible = $("comptes");
+    cible.textContent = "";
+    if (!comptes.length) {
+      cible.appendChild(el("p", "Aucun compte pour l'instant.", "vide"));
+      return;
+    }
+    const table = el("table");
+    const thead = el("thead");
+    const trh = el("tr");
+    ["Client", "Limites", "Clés", "État", ""].forEach((t) => trh.appendChild(el("th", t)));
+    thead.appendChild(trh);
+    const tbody = el("tbody");
+    comptes.forEach((c) => tbody.appendChild(lignesCompte(c)));
+    table.append(thead, tbody);
+    cible.appendChild(table);
+  }
+
+  // Enveloppe commune : bouton bloqué pendant l'appel, erreur affichée, liste rechargée.
+  async function agir(bouton, action) {
+    effacer();
+    bouton.disabled = true;
+    try {
+      await action();
+      await charger();
+    } catch (e) {
+      afficher(e.message);
+    } finally {
+      bouton.disabled = false;
+    }
+  }
+
+  $("btn-connexion").onclick = (ev) => agir(ev.target, async () => {
+    cleAdmin = $("admin").value.trim();
+    if (!cleAdmin) throw new Error("saisissez la clé d'administration");
+    await api("GET", "/admin/accounts"); // vérifie la clé avant d'afficher quoi que ce soit
+    sessionStorage.setItem("pgw_admin", cleAdmin);
+    $("connexion").hidden = true;
+    $("travail").hidden = false;
+  });
+
+  $("btn-creer").onclick = (ev) => agir(ev.target, async () => {
+    const nom = $("nom").value.trim();
+    if (!nom) throw new Error("le nom du client est obligatoire");
+    const corps = {
+      name: nom,
+      rate_per_min: Number($("rate").value),
+      monthly_quota: Number($("quota").value),
+    };
+    const email = $("email").value.trim();
+    if (email) corps.email = email;
+    const r = await api("POST", "/admin/accounts", corps);
+    montrerCle(r.account, r.api_key, true);
+    $("nom").value = "";
+    $("email").value = "";
+  });
+
+  // Clé déjà saisie dans cet onglet : on reprend directement.
+  if (cleAdmin) {
+    $("admin").value = cleAdmin;
+    api("GET", "/admin/accounts")
+      .then(() => {
+        $("connexion").hidden = true;
+        $("travail").hidden = false;
+        return charger();
+      })
+      .catch(() => sessionStorage.removeItem("pgw_admin"));
+  }
+})();
+</script>
+</body>
+</html>

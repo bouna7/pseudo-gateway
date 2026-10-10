@@ -272,6 +272,7 @@ async fn main() {
                 .collect()
         }),
         docs: env_flag("ENABLE_DOCS"),
+        admin_ui: env_flag("ENABLE_ADMIN_UI"),
         public_base_url: env_opt("PUBLIC_BASE_URL"),
     };
     if let Some(origins) = &http.cors_origins {
@@ -279,6 +280,9 @@ async fn main() {
     }
     if http.docs {
         tracing::info!("documentation publiée sur /docs et /openapi.json");
+    }
+    if http.admin_ui {
+        tracing::info!("console d'administration publiée sur /admin/ui");
     }
 
     let app = app::router(state, &http);
