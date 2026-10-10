@@ -162,6 +162,7 @@ const OPTIONS: &[&str] = &[
     "PUBLIC_SIGNUP",
     "SIGNUP_PER_IP_PER_HOUR",
     "SIGNUP_INVITE_CODE",
+    "SIGNUP_REQUIRE_INVITE",
     "DEFAULT_PLAN",
     "DEFAULT_RATE_PER_MIN",
     "DEFAULT_MONTHLY_QUOTA",
@@ -339,6 +340,10 @@ async fn main() {
         accounts,
         signup_per_hour,
         signup_invite_code: env_opt("SIGNUP_INVITE_CODE").map(Arc::new),
+        // Par defaut une invitation est exigee : ouvrir l'inscription a tout
+        // venant doit etre un choix explicite.
+        signup_require_invite: !matches!(env_opt("SIGNUP_REQUIRE_INVITE").as_deref(), Some("false" | "0" | "no" | "off")),
+        public_base_url: env_opt("PUBLIC_BASE_URL"),
         trust_proxy,
     };
 

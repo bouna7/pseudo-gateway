@@ -209,12 +209,20 @@ pub async fn signup(
     // Limite par IP d'abord : un code d'invitation ne doit pas pouvoir être
     // deviné en enchaînant les tentatives.
     accounts.throttle(&format!("su:{ip}"), limit, 3600).await?;
-    if let Some(attendu) = &st.signup_invite_code {
-        let fourni = req.invite_code.as_deref().unwrap_or("");
-        if !crate::auth::ct_eq(fourni, attendu) {
+    if st.signup_require_invite {
+        let fourni = req.invite_code.as_deref().unwrap_or("").trim();
+        // Deux sources acceptées : le code permanent de la configuration, et les
+        // invitations créées depuis la console (limitées en nombre et en durée).
+        let permanent = st
+            .signup_invite_code
+            .as_ref()
+            .is_some_and(|attendu| crate::auth::ct_eq(fourni, attendu));
+        let valide = permanent
+            || (!fourni.is_empty() && accounts.consume_invitation(fourni).await?);
+        if !valide {
             return Err(AppError::Forbidden(
-                "code d'invitation absent ou invalide — demandez-le à l'exploitant \
-                 de cette instance"
+                "invitation absente, invalide, expirée ou déjà utilisée — demandez \
+                 un lien d'invitation à l'exploitant de cette instance"
                     .into(),
             ));
         }

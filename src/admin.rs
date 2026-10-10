@@ -8,7 +8,7 @@ use crate::extract::ApiJson;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use utoipa::ToSchema;
 
@@ -112,6 +112,79 @@ pub async fn issue_key(
             api_key,
         }),
     ))
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct CreateInvitationReq {
+    /// À quoi sert cette invitation, pour s'y retrouver (ex. « Cabinet Durand »).
+    #[schema(example = "Cabinet Durand")]
+    pub label: String,
+    /// Nombre d'inscriptions autorisées (0 = illimité).
+    #[serde(default = "une_fois")]
+    pub max_uses: u64,
+    /// Durée de validité en jours (0 = sans expiration).
+    #[serde(default)]
+    pub valid_days: u64,
+}
+
+/// Une invitation ne sert qu'une fois par défaut : c'est le cas courant, un lien
+/// pour une personne. L'exploitant élargit s'il le souhaite.
+fn une_fois() -> u64 {
+    1
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct InvitationCreated {
+    #[serde(flatten)]
+    pub invitation: crate::accounts::Invitation,
+    /// Lien prêt à envoyer : le code y est déjà, l'invité n'a rien à saisir.
+    #[schema(example = "https://votre-domaine.exemple/signup?invite=inv_…")]
+    pub link: String,
+}
+
+/// Crée une invitation à s'inscrire et renvoie son lien.
+#[utoipa::path(post, path = "/admin/invitations", tag = "admin",
+    request_body = CreateInvitationReq, security(("admin_key" = [])),
+    responses((status = 201, body = InvitationCreated), (status = 401, body = ErrorBody)))]
+pub async fn create_invitation(
+    State(st): State<AppState>,
+    headers: axum::http::HeaderMap,
+    ApiJson(req): ApiJson<CreateInvitationReq>,
+) -> Result<(StatusCode, Json<InvitationCreated>), AppError> {
+    let invitation = accounts(&st)?
+        .create_invitation(req.label, req.max_uses, req.valid_days)
+        .await?;
+    let base = crate::app::origine_demandee(&headers)
+        .or_else(|| st.public_base_url.as_deref().map(str::to_string))
+        .unwrap_or_default();
+    tracing::info!(code = %invitation.code, max_uses = invitation.max_uses, "invitation créée");
+    let link = format!("{base}/signup?invite={}", invitation.code);
+    Ok((
+        StatusCode::CREATED,
+        Json(InvitationCreated { invitation, link }),
+    ))
+}
+
+/// Liste les invitations avec leur consommation.
+#[utoipa::path(get, path = "/admin/invitations", tag = "admin", security(("admin_key" = [])),
+    responses((status = 200, body = Vec<crate::accounts::InvitationView>), (status = 401, body = ErrorBody)))]
+pub async fn list_invitations(
+    State(st): State<AppState>,
+) -> Result<Json<Vec<crate::accounts::InvitationView>>, AppError> {
+    Ok(Json(accounts(&st)?.list_invitations().await?))
+}
+
+/// Révoque une invitation (effet immédiat).
+#[utoipa::path(delete, path = "/admin/invitations/{code}", tag = "admin", security(("admin_key" = [])),
+    params(("code" = String, Path, description = "Code de l'invitation")),
+    responses((status = 204, description = "Révoquée"), (status = 404, body = ErrorBody)))]
+pub async fn revoke_invitation(
+    State(st): State<AppState>,
+    Path(code): Path<String>,
+) -> Result<StatusCode, AppError> {
+    accounts(&st)?.delete_invitation(&code).await?;
+    tracing::info!(%code, "invitation révoquée");
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Révoque une clé (effet immédiat).
