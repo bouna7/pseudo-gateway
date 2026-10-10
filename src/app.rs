@@ -65,6 +65,32 @@ impl Default for HttpConfig {
     }
 }
 
+/// Origine par laquelle la requête est arrivée, reconstruite depuis les en-têtes.
+/// Derrière un proxy, `X-Forwarded-Proto` dit si le visiteur est en HTTPS :
+/// l'ignorer annoncerait `http://` et ferait échouer les essais depuis la page.
+fn origine_demandee(headers: &axum::http::HeaderMap) -> Option<String> {
+    let valeur = |nom: &str| {
+        headers
+            .get(nom)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.split(',').next().unwrap_or(v).trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    let hote = valeur("x-forwarded-host").or_else(|| valeur("host"))?;
+    // Un en-tête Host falsifié ne fait qu'altérer l'exemple affiché dans la doc.
+    if hote.contains('/') || hote.contains(' ') {
+        return None;
+    }
+    let schema = valeur("x-forwarded-proto").unwrap_or_else(|| {
+        if hote.starts_with("localhost") || hote.starts_with("127.0.0.1") {
+            "http".into()
+        } else {
+            "https".into()
+        }
+    });
+    Some(format!("{schema}://{hote}"))
+}
+
 fn cors_layer(origins: &[String]) -> CorsLayer {
     let layer = CorsLayer::new()
         .allow_methods([
@@ -174,9 +200,6 @@ pub fn router(state: AppState, cfg: &HttpConfig) -> Router {
     if cfg.docs {
         let mut spec = api::ApiDoc::openapi();
         spec.info.version = env!("CARGO_PKG_VERSION").to_string();
-        if let Some(url) = &cfg.public_base_url {
-            spec.servers = Some(vec![utoipa::openapi::Server::new(url)]);
-        }
         // Ne pas documenter une porte fermée : sur une instance sans inscription
         // libre, /v1/signup répond « fonctionnalité désactivée », ce qu'un nouvel
         // arrivant prend pour une panne.
@@ -200,9 +223,37 @@ pub fn router(state: AppState, cfg: &HttpConfig) -> Router {
             )
             .route(
                 "/openapi.json",
-                get(move || {
-                    let spec = spec.clone();
-                    async move { Json((*spec).clone()) }
+                // Le serveur annoncé est celui par lequel le visiteur est arrivé.
+                // Avec une adresse figée, ouvrir la doc sur un autre domaine de la
+                // même instance faisait échouer chaque essai : le navigateur
+                // bloque l'appel vers une autre origine (« Failed to fetch »).
+                get({
+                    let repli = cfg.public_base_url.clone();
+                    move |headers: axum::http::HeaderMap| {
+                        let spec = spec.clone();
+                        let repli = repli.clone();
+                        async move {
+                            let mut spec = (*spec).clone();
+                            let mut serveurs: Vec<String> =
+                                origine_demandee(&headers).into_iter().collect();
+                            // L'URL publique reste proposée, pour les appels
+                            // depuis un autre outil que cette page.
+                            if let Some(url) = repli {
+                                if !serveurs.contains(&url) {
+                                    serveurs.push(url);
+                                }
+                            }
+                            if !serveurs.is_empty() {
+                                spec.servers = Some(
+                                    serveurs
+                                        .into_iter()
+                                        .map(|u| utoipa::openapi::Server::new(u))
+                                        .collect(),
+                                );
+                            }
+                            Json(spec)
+                        }
+                    }
                 }),
             )
             .route("/docs", get(api::docs));
@@ -462,6 +513,50 @@ mod tests {
         let (s, spec) = call(&app, "GET", "/openapi.json", None, json!({})).await;
         assert_eq!(s, StatusCode::OK);
         assert!(spec["paths"]["/v1/pseudonymize"].is_object());
+    }
+
+    /// Une instance servie par deux domaines : la doc doit proposer celui par
+    /// lequel on est arrivé, sinon le navigateur bloque chaque essai (appel vers
+    /// une autre origine) et affiche « Failed to fetch ».
+    #[tokio::test]
+    async fn la_doc_vise_le_domaine_du_visiteur() {
+        let app = router(
+            state(0),
+            &HttpConfig {
+                docs: true,
+                public_base_url: Some("https://adresse-publique.exemple".into()),
+                ..Default::default()
+            },
+        );
+        let spec_via = |hote: &'static str, proto: Option<&'static str>| {
+            let app = app.clone();
+            async move {
+                let mut req = Request::builder().uri("/openapi.json").header("host", hote);
+                if let Some(p) = proto {
+                    req = req.header("x-forwarded-proto", p);
+                }
+                let resp = app.oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+                let corps = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+                serde_json::from_slice::<Value>(&corps).unwrap()
+            }
+        };
+
+        let spec = spec_via("autre-domaine.exemple", Some("https")).await;
+        let serveurs: Vec<&str> = spec["servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["url"].as_str().unwrap())
+            .collect();
+        assert_eq!(serveurs[0], "https://autre-domaine.exemple", "le domaine visité d'abord");
+        assert!(
+            serveurs.contains(&"https://adresse-publique.exemple"),
+            "l'URL publique reste proposée : {serveurs:?}"
+        );
+
+        // En local, pas de proxy : le schéma doit rester http.
+        let spec = spec_via("localhost:8080", None).await;
+        assert_eq!(spec["servers"][0]["url"], "http://localhost:8080");
     }
 
     /// Ce que voit un nouvel arrivant : une introduction qui dit comment obtenir
