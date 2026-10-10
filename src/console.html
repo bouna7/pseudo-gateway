@@ -97,6 +97,32 @@
 
     <div id="nouvelle-cle"></div>
 
+    <h2>Invitations</h2>
+    <p class="sous">Un lien à envoyer : l'invité obtient sa clé lui-même, sans rien saisir
+       et sans votre clé d'administration.</p>
+    <fieldset>
+      <legend>Nouvelle invitation</legend>
+      <div class="ligne">
+        <div>
+          <label for="inv-label">Pour qui</label>
+          <input id="inv-label" placeholder="Cabinet Durand">
+        </div>
+        <div>
+          <label for="inv-uses">Utilisations (0 = illimité)</label>
+          <input id="inv-uses" type="number" min="0" value="1">
+        </div>
+        <div>
+          <label for="inv-days">Validité en jours (0 = sans fin)</label>
+          <input id="inv-days" type="number" min="0" value="30">
+        </div>
+      </div>
+      <div class="actions">
+        <button class="principal" id="btn-invitation">Créer le lien d'invitation</button>
+      </div>
+    </fieldset>
+    <div id="nouveau-lien"></div>
+    <div id="invitations"></div>
+
     <h2>Comptes</h2>
     <div id="comptes"><p class="vide">Chargement…</p></div>
   </section>
@@ -212,7 +238,75 @@
     return tr;
   }
 
+  function montrerLien(lien, invitation) {
+    const boite = el("div", undefined, "cle");
+    const quoi = invitation.max_uses === 0 ? "sans limite d'utilisation" : `${invitation.max_uses} utilisation(s)`;
+    boite.appendChild(el("p", `Lien pour « ${invitation.label} », ${quoi}. Envoyez-le à l'invité : il n'aura rien à saisir.`));
+    const ligne = el("div", undefined, "valeur");
+    const champ = document.createElement("input");
+    champ.readOnly = true;
+    champ.value = lien;
+    const copier = el("button", "Copier", "principal");
+    copier.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(lien);
+        copier.textContent = "Copié";
+      } catch {
+        champ.select();
+        copier.textContent = "Ctrl+C";
+      }
+      setTimeout(() => (copier.textContent = "Copier"), 2000);
+    };
+    ligne.append(champ, copier);
+    boite.appendChild(ligne);
+    $("nouveau-lien").prepend(boite);
+  }
+
+  function lignesInvitation(v) {
+    const tr = el("tr");
+    const quoi = el("td");
+    quoi.appendChild(el("div", v.label));
+    quoi.appendChild(el("div", v.code, "mono sous"));
+    tr.appendChild(quoi);
+
+    const usage = el("td", v.max_uses === 0 ? `${v.uses} (illimité)` : `${v.uses} / ${v.max_uses}`);
+    tr.appendChild(usage);
+
+    const etat = el("td");
+    const epuisee = v.max_uses !== 0 && v.uses >= v.max_uses;
+    const libelle = v.expired ? "expirée" : epuisee ? "épuisée" : "active";
+    etat.appendChild(el("span", libelle, v.expired || epuisee ? "badge off" : "badge"));
+    if (v.expires_at) {
+      etat.appendChild(el("div", "jusqu'au " + new Date(v.expires_at * 1000).toLocaleDateString(), "sous"));
+    }
+    tr.appendChild(etat);
+
+    const actions = el("td");
+    const revoquer = el("button", "révoquer", "lien danger");
+    revoquer.onclick = () => agir(revoquer, () => api("DELETE", `/admin/invitations/${v.code}`));
+    actions.appendChild(revoquer);
+    tr.appendChild(actions);
+    return tr;
+  }
+
   async function charger() {
+    const invitations = await api("GET", "/admin/invitations");
+    const cibleInv = $("invitations");
+    cibleInv.textContent = "";
+    if (!invitations.length) {
+      cibleInv.appendChild(el("p", "Aucune invitation en cours.", "vide"));
+    } else {
+      const table = el("table");
+      const thead = el("thead");
+      const trh = el("tr");
+      ["Invitation", "Utilisations", "État", ""].forEach((t) => trh.appendChild(el("th", t)));
+      thead.appendChild(trh);
+      const tbody = el("tbody");
+      invitations.forEach((v) => tbody.appendChild(lignesInvitation(v)));
+      table.append(thead, tbody);
+      cibleInv.appendChild(table);
+    }
+
     const comptes = await api("GET", "/admin/accounts");
     const cible = $("comptes");
     cible.textContent = "";
@@ -252,6 +346,18 @@
     sessionStorage.setItem("pgw_admin", cleAdmin);
     $("connexion").hidden = true;
     $("travail").hidden = false;
+  });
+
+  $("btn-invitation").onclick = (ev) => agir(ev.target, async () => {
+    const label = $("inv-label").value.trim();
+    if (!label) throw new Error("indiquez à qui cette invitation est destinée");
+    const r = await api("POST", "/admin/invitations", {
+      label,
+      max_uses: Number($("inv-uses").value),
+      valid_days: Number($("inv-days").value),
+    });
+    montrerLien(r.link, r);
+    $("inv-label").value = "";
   });
 
   $("btn-creer").onclick = (ev) => agir(ev.target, async () => {

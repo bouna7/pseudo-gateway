@@ -25,9 +25,15 @@ pub struct AppState {
     pub accounts: Option<Arc<Accounts>>,
     /// Inscriptions libres autorisées par IP et par heure (`PUBLIC_SIGNUP=true`).
     pub signup_per_hour: Option<u64>,
-    /// Code d'invitation exigé à l'inscription (`SIGNUP_INVITE_CODE`). Sans lui,
-    /// l'inscription ouverte laisse n'importe qui créer des comptes.
+    /// Code permanent accepté à l'inscription (`SIGNUP_INVITE_CODE`), en plus
+    /// des invitations créées depuis la console.
     pub signup_invite_code: Option<Arc<String>>,
+    /// L'inscription exige un code valide (`SIGNUP_REQUIRE_INVITE`, défaut oui) :
+    /// sans cela, quiconque connaît l'adresse crée un compte.
+    pub signup_require_invite: bool,
+    /// URL publique, pour composer les liens d'invitation quand la requête ne
+    /// dit pas par quel domaine elle est arrivée.
+    pub public_base_url: Option<String>,
     /// Lire l'IP client dans `X-Forwarded-For` (derrière Traefik / nginx).
     pub trust_proxy: bool,
 }
@@ -68,7 +74,7 @@ impl Default for HttpConfig {
 /// Origine par laquelle la requête est arrivée, reconstruite depuis les en-têtes.
 /// Derrière un proxy, `X-Forwarded-Proto` dit si le visiteur est en HTTPS :
 /// l'ignorer annoncerait `http://` et ferait échouer les essais depuis la page.
-fn origine_demandee(headers: &axum::http::HeaderMap) -> Option<String> {
+pub fn origine_demandee(headers: &axum::http::HeaderMap) -> Option<String> {
     let valeur = |nom: &str| {
         headers
             .get(nom)
@@ -179,6 +185,11 @@ pub fn router(state: AppState, cfg: &HttpConfig) -> Router {
                 "/admin/accounts/:id",
                 get(admin::get_account).patch(admin::update_account),
             )
+            .route(
+                "/admin/invitations",
+                post(admin::create_invitation).get(admin::list_invitations),
+            )
+            .route("/admin/invitations/:code", delete(admin::revoke_invitation))
             .route("/admin/accounts/:id/keys", post(admin::issue_key))
             .route("/admin/accounts/:id/keys/:key_id", delete(admin::revoke_key))
             .route_layer(from_fn_with_state(state.clone(), auth::require_admin));
@@ -309,6 +320,8 @@ mod tests {
             accounts: Some(Arc::new(accounts)),
             signup_per_hour: Some(2),
             signup_invite_code: None,
+            signup_require_invite: false,
+            public_base_url: None,
             trust_proxy: false,
         }
     }
@@ -444,11 +457,79 @@ mod tests {
         assert_eq!(e["error"], "rate_limited");
     }
 
+    /// Les invitations se créent depuis la console : un lien à envoyer, limité
+    /// en utilisations, révocable — là où un code figé dans la configuration
+    /// demandait un redéploiement et ne pouvait ni se limiter ni se retirer.
+    #[tokio::test]
+    async fn invitations_creees_depuis_la_console() {
+        let mut st = state(0);
+        st.signup_require_invite = true;
+        st.signup_per_hour = Some(20);
+        let app = app(st);
+        let adm = Some(("x-admin-key", "admin"));
+
+        let (s, inv) = call(
+            &app,
+            "POST",
+            "/admin/invitations",
+            adm,
+            json!({"label": "Cabinet Durand", "max_uses": 1, "valid_days": 30}),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED);
+        let code = inv["code"].as_str().unwrap().to_string();
+        assert!(
+            inv["link"].as_str().unwrap().ends_with(&format!("/signup?invite={code}")),
+            "un lien prêt à envoyer : {}",
+            inv["link"]
+        );
+
+        let inscription = |code: String| json!({"name": "Durand", "email": "d@x.fr", "invite_code": code});
+        let (s, _) = call(&app, "POST", "/v1/signup", None, inscription(code.clone())).await;
+        assert_eq!(s, StatusCode::CREATED, "première utilisation acceptée");
+        let (s, _) = call(&app, "POST", "/v1/signup", None, inscription(code.clone())).await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "une seule utilisation autorisée");
+
+        // La console montre la consommation.
+        let (_, liste) = call(&app, "GET", "/admin/invitations", adm, json!({})).await;
+        assert_eq!(liste[0]["uses"], 1);
+        assert_eq!(liste[0]["max_uses"], 1);
+
+        // Révocation : le lien ne vaut plus rien, même s'il reste des utilisations.
+        let (_, inv2) = call(
+            &app,
+            "POST",
+            "/admin/invitations",
+            adm,
+            json!({"label": "Autre", "max_uses": 5}),
+        )
+        .await;
+        let code2 = inv2["code"].as_str().unwrap().to_string();
+        let (s, _) = call(&app, "DELETE", &format!("/admin/invitations/{code2}"), adm, json!({})).await;
+        assert_eq!(s, StatusCode::NO_CONTENT);
+        let (s, _) = call(&app, "POST", "/v1/signup", None, inscription(code2)).await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "invitation révoquée");
+
+        // Invitation expirée : refusée aussi.
+        let (_, inv3) = call(
+            &app,
+            "POST",
+            "/admin/invitations",
+            adm,
+            json!({"label": "Perimee", "max_uses": 5, "valid_days": 0}),
+        )
+        .await;
+        let code3 = inv3["code"].as_str().unwrap().to_string();
+        let (s, _) = call(&app, "POST", "/v1/signup", None, inscription(code3)).await;
+        assert_eq!(s, StatusCode::CREATED, "0 jour = sans expiration, pas expirée");
+    }
+
     /// Avec un code d'invitation, un nouvel utilisateur obtient sa clé sans
     /// passer par l'exploitant — mais pas n'importe qui.
     #[tokio::test]
     async fn inscription_protegee_par_code_invitation() {
         let mut st = state(0);
+        st.signup_require_invite = true;
         st.signup_invite_code = Some(Arc::new("laissez-moi-entrer".into()));
         // Les essais ratés consomment la limite par IP : c'est voulu (on ne
         // devine pas un code en enchaînant), d'où la marge ici.

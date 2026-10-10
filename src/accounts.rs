@@ -121,6 +121,37 @@ pub struct Usage {
     pub monthly_quota: u64,
 }
 
+/// Invitation à s'inscrire : un code que l'exploitant crée et distribue, au lieu
+/// d'un code unique figé dans la configuration, qu'il fallait redéployer pour
+/// changer et qui ne pouvait être ni limité ni révoqué.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct Invitation {
+    /// Code à présenter à l'inscription (il voyage dans le lien d'invitation).
+    pub code: String,
+    /// À quoi elle sert, pour s'y retrouver dans la liste.
+    pub label: String,
+    /// Nombre d'inscriptions autorisées (0 = illimité).
+    pub max_uses: u64,
+    /// Horodatage Unix d'expiration (0 = sans limite de date).
+    pub expires_at: u64,
+    pub created_at: u64,
+}
+
+impl Invitation {
+    pub fn expiree(&self, maintenant: u64) -> bool {
+        self.expires_at != 0 && maintenant >= self.expires_at
+    }
+}
+
+/// Invitation + état de consommation, pour l'affichage dans la console.
+#[derive(Serialize, ToSchema)]
+pub struct InvitationView {
+    #[serde(flatten)]
+    pub invitation: Invitation,
+    pub uses: u64,
+    pub expired: bool,
+}
+
 /// Paramètres d'un nouveau compte (admin ou inscription).
 pub struct NewAccount {
     pub name: String,
@@ -404,6 +435,78 @@ impl Accounts {
         })
     }
 
+    // ── Invitations ──────────────────────────────────────────────────────
+
+    /// Crée une invitation ; le code est tiré au sort, assez long pour ne pas
+    /// se deviner puisqu'il voyage dans un lien.
+    pub async fn create_invitation(
+        &self,
+        label: String,
+        max_uses: u64,
+        valide_jours: u64,
+    ) -> Result<Invitation, AppError> {
+        let maintenant = now_secs();
+        let invitation = Invitation {
+            code: format!("inv_{}", random_hex(12)),
+            label: validate_name(&label)?,
+            max_uses,
+            expires_at: if valide_jours == 0 {
+                0
+            } else {
+                maintenant + valide_jours * 86_400
+            },
+            created_at: maintenant,
+        };
+        self.store.put_invitation(&invitation).await?;
+        Ok(invitation)
+    }
+
+    pub async fn list_invitations(&self) -> Result<Vec<InvitationView>, AppError> {
+        let maintenant = now_secs();
+        let mut invitations = self.store.list_invitations().await?;
+        invitations.sort_by_key(|i| i.created_at);
+        let mut vues = Vec::with_capacity(invitations.len());
+        for invitation in invitations {
+            let uses = self.store.peek(&format!("inv:{}", invitation.code)).await?;
+            vues.push(InvitationView {
+                expired: invitation.expiree(maintenant),
+                uses,
+                invitation,
+            });
+        }
+        Ok(vues)
+    }
+
+    pub async fn delete_invitation(&self, code: &str) -> Result<(), AppError> {
+        if self.store.get_invitation(code).await?.is_none() {
+            return Err(AppError::NotFound(format!("invitation {code}")));
+        }
+        self.store.delete_invitation(code).await?;
+        Ok(())
+    }
+
+    /// Consomme une utilisation. Le décompte est atomique : deux inscriptions
+    /// simultanées ne peuvent pas dépasser ensemble le nombre autorisé.
+    pub async fn consume_invitation(&self, code: &str) -> Result<bool, AppError> {
+        let Some(invitation) = self.store.get_invitation(code).await? else {
+            return Ok(false);
+        };
+        let maintenant = now_secs();
+        if invitation.expiree(maintenant) {
+            return Ok(false);
+        }
+        // Durée de vie du compteur : jusqu'à l'expiration, sinon large.
+        let ttl = if invitation.expires_at == 0 {
+            365 * 86_400
+        } else {
+            invitation.expires_at.saturating_sub(maintenant) + 60
+        };
+        self.store
+            .try_hit(&format!("inv:{code}"), invitation.max_uses, ttl)
+            .await
+            .map_err(AppError::from)
+    }
+
     /// Limite générique par fenêtre fixe (ex. inscriptions par IP et par heure).
     pub async fn throttle(&self, bucket: &str, limit: u64, window_secs: u64) -> Result<(), AppError> {
         let now = now_secs();
@@ -428,6 +531,11 @@ pub trait AccountStore: Send + Sync {
     /// Crée ou remplace le compte.
     async fn put(&self, account: &Account) -> Result<(), VaultError>;
     async fn list(&self) -> Result<Vec<Account>, VaultError>;
+    /// Invitations : mêmes opérations, dans leur propre espace de clés.
+    async fn put_invitation(&self, invitation: &Invitation) -> Result<(), VaultError>;
+    async fn get_invitation(&self, code: &str) -> Result<Option<Invitation>, VaultError>;
+    async fn list_invitations(&self) -> Result<Vec<Invitation>, VaultError>;
+    async fn delete_invitation(&self, code: &str) -> Result<(), VaultError>;
     async fn bind_key(&self, hash: &str, account_id: &str) -> Result<(), VaultError>;
     async fn unbind_key(&self, hash: &str) -> Result<(), VaultError>;
     async fn account_id_for_key(&self, hash: &str) -> Result<Option<String>, VaultError>;
@@ -448,6 +556,7 @@ pub struct InMemoryAccountStore {
 struct MemInner {
     accounts: HashMap<String, Account>,
     keys: HashMap<String, String>,
+    invitations: HashMap<String, Invitation>,
     counters: HashMap<String, (u64, Instant)>,
 }
 
@@ -476,6 +585,26 @@ impl AccountStore for InMemoryAccountStore {
 
     async fn list(&self) -> Result<Vec<Account>, VaultError> {
         Ok(self.lock()?.accounts.values().cloned().collect())
+    }
+
+    async fn put_invitation(&self, invitation: &Invitation) -> Result<(), VaultError> {
+        self.lock()?
+            .invitations
+            .insert(invitation.code.clone(), invitation.clone());
+        Ok(())
+    }
+
+    async fn get_invitation(&self, code: &str) -> Result<Option<Invitation>, VaultError> {
+        Ok(self.lock()?.invitations.get(code).cloned())
+    }
+
+    async fn list_invitations(&self) -> Result<Vec<Invitation>, VaultError> {
+        Ok(self.lock()?.invitations.values().cloned().collect())
+    }
+
+    async fn delete_invitation(&self, code: &str) -> Result<(), VaultError> {
+        self.lock()?.invitations.remove(code);
+        Ok(())
     }
 
     async fn bind_key(&self, hash: &str, account_id: &str) -> Result<(), VaultError> {
@@ -590,6 +719,51 @@ impl AccountStore for RedisAccountStore {
             }
         }
         Ok(out)
+    }
+
+    async fn put_invitation(&self, invitation: &Invitation) -> Result<(), VaultError> {
+        let json = serde_json::to_string(invitation).map_err(store_err)?;
+        let mut c = self.conn.clone();
+        redis::pipe()
+            .atomic()
+            .set(format!("pga:inv:{}", invitation.code), json)
+            .sadd("pga:invitations", &invitation.code)
+            .query_async::<()>(&mut c)
+            .await
+            .map_err(store_err)
+    }
+
+    async fn get_invitation(&self, code: &str) -> Result<Option<Invitation>, VaultError> {
+        let mut c = self.conn.clone();
+        let raw: Option<String> = c.get(format!("pga:inv:{code}")).await.map_err(store_err)?;
+        raw.map(|s| serde_json::from_str(&s).map_err(store_err))
+            .transpose()
+    }
+
+    async fn list_invitations(&self) -> Result<Vec<Invitation>, VaultError> {
+        let mut c = self.conn.clone();
+        let codes: HashSet<String> = c.smembers("pga:invitations").await.map_err(store_err)?;
+        let mut out = Vec::with_capacity(codes.len());
+        for code in codes {
+            if let Some(i) = self.get_invitation(&code).await? {
+                out.push(i);
+            }
+        }
+        Ok(out)
+    }
+
+    async fn delete_invitation(&self, code: &str) -> Result<(), VaultError> {
+        let mut c = self.conn.clone();
+        redis::pipe()
+            .atomic()
+            .del(format!("pga:inv:{code}"))
+            .srem("pga:invitations", code)
+            // Le compteur d'utilisations suit l'invitation : un code recréé plus
+            // tard ne doit pas hériter des consommations de l'ancien.
+            .del(format!("pga:c:inv:{code}"))
+            .query_async::<()>(&mut c)
+            .await
+            .map_err(store_err)
     }
 
     async fn bind_key(&self, hash: &str, account_id: &str) -> Result<(), VaultError> {

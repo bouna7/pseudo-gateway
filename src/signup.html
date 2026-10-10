@@ -73,6 +73,17 @@
   // quelques ouvertures de la page suffisaient à bloquer les vraies créations.
   if ($("bloc-code").dataset.exige === "oui") $("bloc-code").hidden = false;
 
+  // Lien d'invitation : le code est dans l'adresse, l'invité n'a rien à saisir.
+  const invite = new URLSearchParams(location.search).get("invite");
+  if (invite) {
+    $("code").value = invite;
+    $("bloc-code").hidden = true;
+    const note = document.createElement("p");
+    note.className = "sous";
+    note.textContent = "Invitation reconnue : il ne reste qu'à vous présenter.";
+    $("formulaire").prepend(note);
+  }
+
   $("formulaire").addEventListener("submit", async (ev) => {
     ev.preventDefault();
     msg.className = "msg";

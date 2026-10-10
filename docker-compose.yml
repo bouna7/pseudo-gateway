@@ -71,6 +71,8 @@ services:
       SIGNUP_PER_IP_PER_HOUR: ${SIGNUP_PER_IP_PER_HOUR:-5}
       # Code exige a l'inscription publique : sans lui, n'importe qui cree un compte.
       SIGNUP_INVITE_CODE: ${SIGNUP_INVITE_CODE:-}
+      # Exiger une invitation a l'inscription (defaut oui).
+      SIGNUP_REQUIRE_INVITE: ${SIGNUP_REQUIRE_INVITE:-true}
       DEFAULT_PLAN: ${DEFAULT_PLAN:-free}
       DEFAULT_RATE_PER_MIN: ${DEFAULT_RATE_PER_MIN:-60}
       DEFAULT_MONTHLY_QUOTA: ${DEFAULT_MONTHLY_QUOTA:-10000}
