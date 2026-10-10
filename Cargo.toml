@@ -1,6 +1,6 @@
 [package]
 name = "pseudo-gateway"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2021"
 description = "Passerelle de pseudonymisation chiffrée (AES-256-GCM) entre Spring AI RAG et un LLM cloud"
 

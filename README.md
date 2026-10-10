@@ -202,7 +202,7 @@ PUBLIC_BASE_URL=https://votre-domaine.exemple
 CORS_ALLOWED_ORIGINS=           # domaines des sites appelant depuis un navigateur
 
 # Version déployée (docker-compose.images.yml uniquement)
-PGW_VERSION=0.2.4
+PGW_VERSION=0.2.5
 ```
 
 4. **Mise à jour** : changer `PGW_VERSION` et redéployer (ou bumper l'`ARG
