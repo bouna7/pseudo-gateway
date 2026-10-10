@@ -51,7 +51,7 @@
       <input id="nom" required placeholder="Cabinet Durand">
       <label for="email">E-mail</label>
       <input id="email" type="email" required placeholder="contact@exemple.fr">
-      <div id="bloc-code" hidden>
+      <div id="bloc-code" data-exige="__CODE_EXIGE__" hidden>
         <label for="code">Code d'invitation</label>
         <input id="code" placeholder="fourni par l'exploitant du service">
       </div>
@@ -68,18 +68,10 @@
   const $ = (id) => document.getElementById(id);
   const msg = $("msg");
 
-  // Le code n'est demandé que si l'instance en exige un ; la page l'apprend en
-  // tentant une inscription vide plutôt qu'en le devinant.
-  fetch("/v1/signup", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: "", email: "" }),
-  })
-    .then((r) => r.json())
-    .then((d) => {
-      if (d && d.error === "forbidden") $("bloc-code").hidden = false;
-    })
-    .catch(() => {});
+  // Le serveur inscrit la réponse dans la page au moment de la servir. Une
+  // sonde par requête consommerait le quota d'inscriptions de l'adresse IP :
+  // quelques ouvertures de la page suffisaient à bloquer les vraies créations.
+  if ($("bloc-code").dataset.exige === "oui") $("bloc-code").hidden = false;
 
   $("formulaire").addEventListener("submit", async (ev) => {
     ev.preventDefault();

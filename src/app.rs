@@ -124,9 +124,22 @@ pub fn router(state: AppState, cfg: &HttpConfig) -> Router {
     // Page publique d'inscription : elle ne sert à rien si l'inscription est
     // fermée, et la servir annoncerait une porte qui n'existe pas.
     if state.signup_per_hour.is_some() {
+        // La page apprend ici si un code est exigé : la lui faire deviner par une
+        // requête d'essai consommait une inscription du quota de l'IP.
+        let page: Arc<str> = Arc::from(include_str!("signup.html").replace(
+            "__CODE_EXIGE__",
+            if state.signup_invite_code.is_some() {
+                "oui"
+            } else {
+                "non"
+            },
+        ));
         app = app.route(
             "/signup",
-            get(|| async { axum::response::Html(include_str!("signup.html")) }),
+            get(move || {
+                let page = page.clone();
+                async move { axum::response::Html(page.to_string()) }
+            }),
         );
     }
 
@@ -409,9 +422,18 @@ mod tests {
         assert_eq!(s, StatusCode::CREATED);
         assert!(r["api_key"].as_str().unwrap().starts_with("pgw_"));
 
-        // La page d'inscription accompagne l'ouverture ; fermée, elle disparaît.
-        let (s, _) = call(&app, "GET", "/signup", None, json!({})).await;
-        assert_eq!(s, StatusCode::OK);
+        // La page sait d'avance qu'un code est exigé : la lui faire deviner par
+        // une requête d'essai consommerait une inscription du quota de l'IP.
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri("/signup").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let page = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let page = String::from_utf8(page.to_vec()).unwrap();
+        assert!(page.contains(r#"data-exige="oui""#), "le champ code doit s'afficher");
+        assert!(!page.contains("__CODE_EXIGE__"), "gabarit non substitué");
         let mut etat_ferme = state(0);
         etat_ferme.signup_per_hour = None;
         let ferme = router(
