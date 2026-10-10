@@ -59,6 +59,8 @@ services:
       # API publique (comptes, clés, quotas) : active si ADMIN_API_KEY est définie.
       PUBLIC_SIGNUP: ${PUBLIC_SIGNUP:-false}
       SIGNUP_PER_IP_PER_HOUR: ${SIGNUP_PER_IP_PER_HOUR:-5}
+      # Code exige a l'inscription publique : sans lui, n'importe qui cree un compte.
+      SIGNUP_INVITE_CODE: ${SIGNUP_INVITE_CODE:-}
       DEFAULT_PLAN: ${DEFAULT_PLAN:-free}
       DEFAULT_RATE_PER_MIN: ${DEFAULT_RATE_PER_MIN:-60}
       DEFAULT_MONTHLY_QUOTA: ${DEFAULT_MONTHLY_QUOTA:-10000}

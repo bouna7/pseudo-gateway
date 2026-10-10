@@ -161,6 +161,7 @@ const OPTIONS: &[&str] = &[
     "ADMIN_API_KEY",
     "PUBLIC_SIGNUP",
     "SIGNUP_PER_IP_PER_HOUR",
+    "SIGNUP_INVITE_CODE",
     "DEFAULT_PLAN",
     "DEFAULT_RATE_PER_MIN",
     "DEFAULT_MONTHLY_QUOTA",
@@ -337,6 +338,7 @@ async fn main() {
         admin_key,
         accounts,
         signup_per_hour,
+        signup_invite_code: env_opt("SIGNUP_INVITE_CODE").map(Arc::new),
         trust_proxy,
     };
 

@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Obtenir une clé d'API — pseudo-gateway</title>
+<style>
+  :root { color-scheme: light dark; --bord: #d9dce1; --fond2: #f6f7f9; --texte2: #5b6472;
+          --accent: #1f6feb; --ok: #1a7f37; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bord: #30363d; --fond2: #161b22; --texte2: #9aa4b2; --accent: #4493f8; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .page { max-width: 620px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 23px; margin: 0 0 8px; }
+  p.sous { color: var(--texte2); margin: 0 0 24px; }
+  fieldset { border: 1px solid var(--bord); border-radius: 10px; padding: 16px; margin: 0; }
+  legend { padding: 0 6px; color: var(--texte2); font-size: 13px; }
+  label { display: block; font-size: 13px; color: var(--texte2); margin: 12px 0 4px; }
+  input { width: 100%; padding: 10px; border: 1px solid var(--bord); border-radius: 8px;
+          background: transparent; color: inherit; font: inherit; }
+  button { padding: 10px 16px; border-radius: 8px; border: 1px solid var(--accent);
+           background: var(--accent); color: #fff; font: inherit; cursor: pointer; margin-top: 18px; }
+  button.copier { margin: 0; }
+  button:disabled { opacity: .5; cursor: progress; }
+  .msg { padding: 10px 12px; border-radius: 8px; margin: 16px 0; display: none; }
+  .msg.err { display: block; background: #fdeaea; color: #8a1f1f; }
+  @media (prefers-color-scheme: dark) { .msg.err { background: #3a1413; color: #ffb4ab; } }
+  .cle { border: 2px solid var(--ok); border-radius: 10px; padding: 16px; margin: 20px 0; }
+  .cle p { margin: 0 0 10px; font-size: 14px; }
+  .valeur { display: flex; gap: 8px; }
+  .valeur input { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+  pre { background: var(--fond2); border: 1px solid var(--bord); border-radius: 8px;
+        padding: 12px; overflow-x: auto; font-size: 13px; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>Obtenir une clé d'API</h1>
+  <p class="sous">Cette clé vous permet de masquer les données personnelles d'un texte avant
+     de l'envoyer à une IA, puis de les restituer dans sa réponse.</p>
+
+  <div id="msg" class="msg"></div>
+
+  <form id="formulaire">
+    <fieldset>
+      <legend>Votre inscription</legend>
+      <label for="nom">Nom ou organisation</label>
+      <input id="nom" required placeholder="Cabinet Durand">
+      <label for="email">E-mail</label>
+      <input id="email" type="email" required placeholder="contact@exemple.fr">
+      <div id="bloc-code" hidden>
+        <label for="code">Code d'invitation</label>
+        <input id="code" placeholder="fourni par l'exploitant du service">
+      </div>
+      <button id="btn" type="submit">Créer mon compte</button>
+    </fieldset>
+  </form>
+
+  <div id="resultat"></div>
+</div>
+
+<script>
+(() => {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const msg = $("msg");
+
+  // Le code n'est demandé que si l'instance en exige un ; la page l'apprend en
+  // tentant une inscription vide plutôt qu'en le devinant.
+  fetch("/v1/signup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: "", email: "" }),
+  })
+    .then((r) => r.json())
+    .then((d) => {
+      if (d && d.error === "forbidden") $("bloc-code").hidden = false;
+    })
+    .catch(() => {});
+
+  $("formulaire").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    msg.className = "msg";
+    const btn = $("btn");
+    btn.disabled = true;
+    try {
+      const corps = { name: $("nom").value.trim(), email: $("email").value.trim() };
+      const code = $("code").value.trim();
+      if (code) corps.invite_code = code;
+      const r = await fetch("/v1/signup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+        body: JSON.stringify(corps),
+      });
+      const d = await r.json();
+      if (!r.ok) {
+        if (d.error === "forbidden") $("bloc-code").hidden = false;
+        throw new Error(d.message || `${r.status}`);
+      }
+      montrerCle(d);
+      $("formulaire").hidden = true;
+    } catch (e) {
+      msg.textContent = e.message;
+      msg.className = "msg err";
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  function montrerCle(d) {
+    const boite = document.createElement("div");
+    boite.className = "cle";
+
+    const titre = document.createElement("p");
+    titre.innerHTML = "<strong>Votre clé d'API.</strong> Elle ne sera plus jamais affichée : copiez-la et conservez-la comme un mot de passe.";
+    boite.appendChild(titre);
+
+    const ligne = document.createElement("div");
+    ligne.className = "valeur";
+    const champ = document.createElement("input");
+    champ.readOnly = true;
+    champ.value = d.api_key;
+    const copier = document.createElement("button");
+    copier.className = "copier";
+    copier.textContent = "Copier";
+    copier.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(d.api_key);
+        copier.textContent = "Copié";
+      } catch {
+        champ.select();
+        copier.textContent = "Ctrl+C";
+      }
+      setTimeout(() => (copier.textContent = "Copier"), 2000);
+    };
+    ligne.append(champ, copier);
+    boite.appendChild(ligne);
+
+    const limites = document.createElement("p");
+    limites.style.marginTop = "12px";
+    limites.textContent =
+      `Compte « ${d.account.name} » : ` +
+      `${d.account.rate_per_min || "illimité"} requêtes par minute, ` +
+      `${d.account.monthly_quota || "illimité"} par mois.`;
+    boite.appendChild(limites);
+
+    const essai = document.createElement("div");
+    const h = document.createElement("p");
+    h.innerHTML = "<strong>Premier appel</strong>";
+    const pre = document.createElement("pre");
+    pre.textContent =
+      `curl -X POST ${location.origin}/v1/pseudonymize \\\n` +
+      `  -H "X-Api-Key: ${d.api_key}" \\\n` +
+      `  -H "Content-Type: application/json" \\\n` +
+      `  -d '{"text": "Marie Dupont (marie@exemple.fr) a signé."}'`;
+    const doc = document.createElement("p");
+    doc.innerHTML = 'Documentation complète : <a href="/docs">/docs</a>';
+    essai.append(h, pre, doc);
+    boite.appendChild(essai);
+
+    $("resultat").appendChild(boite);
+  }
+})();
+</script>
+</body>
+</html>

@@ -307,10 +307,21 @@ librement son `tenant_id`, comme avant. Ne la donnez jamais à un tiers.
 |---|---|---|
 | `POST /v1/pseudonymize`, `POST /v1/depseudonymize` | clé compte ou interne | Décomptés (limite/minute + quota mensuel) |
 | `GET /v1/me` | clé compte | Compte + consommation du mois (non décompté) |
-| `POST /v1/signup` | aucune | Inscription libre si `PUBLIC_SIGNUP=true` (limitée par IP) |
+| `GET /signup` | aucune | **Page d'inscription** : l'utilisateur obtient sa clé lui-même (si `PUBLIC_SIGNUP=true`) |
+| `POST /v1/signup` | aucune | Inscription, limitée par IP et par `SIGNUP_INVITE_CODE` si défini |
 | `GET /admin/ui` | — (la page demande la clé) | **Console** : créer des comptes et des clés depuis un navigateur (`ENABLE_ADMIN_UI=true`) |
 | `POST/GET /admin/accounts`, `GET/PATCH /admin/accounts/{id}` | `X-Admin-Key` | Créer, lister, modifier, désactiver |
 | `POST /admin/accounts/{id}/keys`, `DELETE …/keys/{key_id}` | `X-Admin-Key` | Rotation / révocation de clé |
+
+**Comment vos clients obtiennent leur clé**, au choix :
+
+- **Vous la créez** dans la console `/admin/ui` et vous la leur envoyez. Contrôle
+  total, mais vous êtes dans la boucle à chaque nouvel utilisateur.
+- **Ils s'inscrivent eux-mêmes** sur `/signup` (`PUBLIC_SIGNUP=true`) en saisissant
+  un **code d'invitation** que vous leur avez communiqué (`SIGNUP_INVITE_CODE`).
+  Ils n'ont alors besoin ni de vous, ni de votre clé d'administration — et le
+  code empêche que n'importe qui crée des comptes. Sans code configuré,
+  l'inscription est ouverte à quiconque connaît l'adresse : à éviter en public.
 
 La clé se passe en `X-Api-Key: <clé>` **ou** `Authorization: Bearer <clé>`.
 Dépassements : `429` avec `Retry-After` (`rate_limited`) ou `quota_exceeded`.

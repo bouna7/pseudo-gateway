@@ -79,6 +79,11 @@ pub struct SignupReq {
     pub name: String,
     #[schema(example = "dev@acme.fr")]
     pub email: String,
+    /// Code d'invitation, quand l'instance en exige un : l'exploitant vous le
+    /// communique. Il évite que n'importe qui crée des comptes, sans vous
+    /// obliger à passer par lui pour obtenir votre clé.
+    #[serde(default)]
+    pub invite_code: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -201,7 +206,19 @@ pub async fn signup(
         return Err(AppError::Disabled);
     };
     let ip = client_ip(&headers, peer.map(|c| c.0), st.trust_proxy);
+    // Limite par IP d'abord : un code d'invitation ne doit pas pouvoir être
+    // deviné en enchaînant les tentatives.
     accounts.throttle(&format!("su:{ip}"), limit, 3600).await?;
+    if let Some(attendu) = &st.signup_invite_code {
+        let fourni = req.invite_code.as_deref().unwrap_or("");
+        if !crate::auth::ct_eq(fourni, attendu) {
+            return Err(AppError::Forbidden(
+                "code d'invitation absent ou invalide — demandez-le à l'exploitant \
+                 de cette instance"
+                    .into(),
+            ));
+        }
+    }
     let (account, api_key) = accounts
         .create(NewAccount {
             name: req.name,

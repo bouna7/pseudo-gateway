@@ -25,6 +25,9 @@ pub struct AppState {
     pub accounts: Option<Arc<Accounts>>,
     /// Inscriptions libres autorisées par IP et par heure (`PUBLIC_SIGNUP=true`).
     pub signup_per_hour: Option<u64>,
+    /// Code d'invitation exigé à l'inscription (`SIGNUP_INVITE_CODE`). Sans lui,
+    /// l'inscription ouverte laisse n'importe qui créer des comptes.
+    pub signup_invite_code: Option<Arc<String>>,
     /// Lire l'IP client dans `X-Forwarded-For` (derrière Traefik / nginx).
     pub trust_proxy: bool,
 }
@@ -117,6 +120,15 @@ pub fn router(state: AppState, cfg: &HttpConfig) -> Router {
         .route("/v1/signup", post(api::signup))
         .merge(counted)
         .merge(uncounted);
+
+    // Page publique d'inscription : elle ne sert à rien si l'inscription est
+    // fermée, et la servir annoncerait une porte qui n'existe pas.
+    if state.signup_per_hour.is_some() {
+        app = app.route(
+            "/signup",
+            get(|| async { axum::response::Html(include_str!("signup.html")) }),
+        );
+    }
 
     if state.admin_key.is_some() {
         let admin_routes = Router::new()
@@ -232,6 +244,7 @@ mod tests {
             admin_key: Some(Arc::new("admin".into())),
             accounts: Some(Arc::new(accounts)),
             signup_per_hour: Some(2),
+            signup_invite_code: None,
             trust_proxy: false,
         }
     }
@@ -365,6 +378,51 @@ mod tests {
         let (s, e) = call(&app, "POST", "/v1/depseudonymize", Some(("x-api-key", &key)), json!({"text": "x"})).await;
         assert_eq!(s, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(e["error"], "rate_limited");
+    }
+
+    /// Avec un code d'invitation, un nouvel utilisateur obtient sa clé sans
+    /// passer par l'exploitant — mais pas n'importe qui.
+    #[tokio::test]
+    async fn inscription_protegee_par_code_invitation() {
+        let mut st = state(0);
+        st.signup_invite_code = Some(Arc::new("laissez-moi-entrer".into()));
+        // Les essais ratés consomment la limite par IP : c'est voulu (on ne
+        // devine pas un code en enchaînant), d'où la marge ici.
+        st.signup_per_hour = Some(5);
+        let app = app(st);
+        let demande = |code: Option<&str>| {
+            let mut corps = json!({"name": "Cabinet Durand", "email": "contact@exemple.fr"});
+            if let Some(c) = code {
+                corps["invite_code"] = json!(c);
+            }
+            corps
+        };
+
+        let (s, e) = call(&app, "POST", "/v1/signup", None, demande(None)).await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "sans code : refusé");
+        assert!(e["message"].as_str().unwrap().contains("invitation"));
+
+        let (s, _) = call(&app, "POST", "/v1/signup", None, demande(Some("au hasard"))).await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "mauvais code : refusé");
+
+        let (s, r) = call(&app, "POST", "/v1/signup", None, demande(Some("laissez-moi-entrer"))).await;
+        assert_eq!(s, StatusCode::CREATED);
+        assert!(r["api_key"].as_str().unwrap().starts_with("pgw_"));
+
+        // La page d'inscription accompagne l'ouverture ; fermée, elle disparaît.
+        let (s, _) = call(&app, "GET", "/signup", None, json!({})).await;
+        assert_eq!(s, StatusCode::OK);
+        let mut etat_ferme = state(0);
+        etat_ferme.signup_per_hour = None;
+        let ferme = router(
+            etat_ferme,
+            &HttpConfig {
+                docs: true,
+                ..Default::default()
+            },
+        );
+        let (s, _) = call(&ferme, "GET", "/signup", None, json!({})).await;
+        assert_eq!(s, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

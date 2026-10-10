@@ -60,7 +60,7 @@ fn presented_key<'a>(headers: &'a HeaderMap, header_name: &str) -> Option<&'a st
 }
 
 /// Égalité en temps constant (on compare les empreintes : longueur égale).
-fn ct_eq(a: &str, b: &str) -> bool {
+pub fn ct_eq(a: &str, b: &str) -> bool {
     Sha256::digest(a.as_bytes())
         .ct_eq(&Sha256::digest(b.as_bytes()))
         .into()
