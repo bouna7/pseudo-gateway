@@ -1,4 +1,45 @@
-# Intégrations : NER automatique + Advisor Spring AI
+# Intégrations : clients prêts à l'emploi, NER automatique, Advisor Spring AI
+
+## Clients
+
+| Fichier | Dépendances | Pour |
+|---|---|---|
+| [`python/pseudo_gateway.py`](python/pseudo_gateway.py) | aucune (bibliothèque standard) | Python 3.10+ |
+| [`java/PseudoGatewayClient.java`](java/PseudoGatewayClient.java) | aucune (JDK 11+) | Java, hors Spring |
+| [`spring/PseudoGatewayClient.java`](spring/PseudoGatewayClient.java) | Spring 6+ | applications Spring |
+| [`spring/PseudonymizationAdvisor.java`](spring/PseudonymizationAdvisor.java) | Spring AI 1.0+ | brancher la passerelle dans un `ChatClient` |
+
+**Python**
+
+```python
+from pseudo_gateway import PseudoGateway
+
+gw = PseudoGateway("https://votre-domaine", "pgw_votre_cle")
+
+propre = gw.pseudonymize("Marie Dupont (marie@exemple.fr) a signé.")
+reponse = appeler_votre_llm(propre.text)       # le LLM ne voit que des jetons
+print(gw.depseudonymize(reponse))              # les vraies valeurs reviennent
+```
+
+**Java, sans dépendance**
+
+```bash
+javac PseudoGatewayClient.java
+java PseudoGatewayClient https://votre-domaine pgw_votre_cle
+```
+
+### Trois choses à savoir avant de brancher
+
+1. **La clé d'API est obligatoire**, dans l'en-tête `X-Api-Key` (ou
+   `Authorization: Bearer`). Sans elle, tout repart en `401` : c'est l'oubli le
+   plus fréquent. Demandez-la à l'exploitant de l'instance.
+2. **Les jetons de la réponse n'ont pas de crochets.** `tokens` contient
+   `EMAIL_1`, le texte contient `[EMAIL_1]`, et c'est cette forme-là qu'il faut
+   renvoyer à `/v1/depseudonymize`. Les deux clients fournissent `bracketed`
+   pour éviter l'erreur.
+3. **Gérez le `429`.** Au-delà du quota ou de la limite par minute, la réponse
+   porte un en-tête `Retry-After`. Le client Python patiente et réessaie ; en
+   Java, `estLimite()` vous le signale.
 
 ## 1. NER automatique (Presidio)
 

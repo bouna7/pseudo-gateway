@@ -45,6 +45,11 @@ pub struct PseudoResp {
     /// Texte avec jetons, envoyable au LLM.
     #[schema(example = "[PERSON_1] ([EMAIL_1]) a signé.")]
     pub text: String,
+    /// Jetons créés ou réutilisés, **sans les crochets**. Dans le texte, ils
+    /// s'écrivent entre crochets : la liste contient `EMAIL_1`, le texte contient
+    /// `[EMAIL_1]`. C'est cette forme entre crochets qu'il faut renvoyer à
+    /// `/v1/depseudonymize`.
+    #[schema(example = json!(["PERSON_1", "EMAIL_1"]))]
     pub tokens: Vec<String>,
 }
 
