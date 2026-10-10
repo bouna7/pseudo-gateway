@@ -66,11 +66,29 @@ fn ct_eq(a: &str, b: &str) -> bool {
         .into()
 }
 
+/// Dit ce qui manque, sans révéler si une clé vaut ailleurs : on ne commente que
+/// la **forme** de ce que l'appelant a lui-même envoyé.
+fn explique_cle_api(presentee: Option<&str>) -> AppError {
+    AppError::Unauthorized(match presentee {
+        None => "clé d'API manquante : ajoutez l'en-tête « X-Api-Key: votre-cle » \
+                 (ou « Authorization: Bearer votre-cle »)"
+            .to_string(),
+        Some(k) if k.starts_with(crate::accounts::KEY_PREFIX) => {
+            "clé d'API inconnue ou révoquée : demandez-en une nouvelle à l'exploitant \
+             de cette instance"
+                .to_string()
+        }
+        Some(_) => "clé d'API invalide : une clé de compte commence par « pgw_ ». \
+                    La clé d'administration n'ouvre que les routes /admin."
+            .to_string(),
+    })
+}
+
 async fn resolve(st: &AppState, headers: &HeaderMap, count: bool) -> Result<Principal, AppError> {
     if st.open_mode() {
         return Ok(Principal::Internal);
     }
-    let key = presented_key(headers, "x-api-key").ok_or(AppError::Unauthorized)?;
+    let key = presented_key(headers, "x-api-key").ok_or_else(|| explique_cle_api(None))?;
     if let Some(expected) = &st.api_key {
         if ct_eq(key, expected) {
             return Ok(Principal::Internal);
@@ -87,7 +105,7 @@ async fn resolve(st: &AppState, headers: &HeaderMap, count: bool) -> Result<Prin
             return Ok(Principal::Account(Box::new(account)));
         }
     }
-    Err(AppError::Unauthorized)
+    Err(explique_cle_api(Some(key)))
 }
 
 /// Garde des endpoints de pseudonymisation : authentifie et décompte la requête.
@@ -121,7 +139,24 @@ pub async fn require_admin(
     let expected = st.admin_key.as_ref().ok_or(AppError::Disabled)?;
     match presented_key(req.headers(), "x-admin-key") {
         Some(k) if ct_eq(k, expected) => Ok(next.run(req).await),
-        _ => Err(AppError::Unauthorized),
+        // Piège courant : la clé est bien là, mais dans l'en-tête des endpoints /v1.
+        None if req.headers().contains_key("x-api-key") => Err(AppError::Unauthorized(
+            "ces routes attendent l'en-tête « X-Admin-Key » ; l'en-tête « X-Api-Key » \
+             fourni ne les ouvre pas"
+                .into(),
+        )),
+        None => Err(AppError::Unauthorized(
+            "clé d'administration manquante : ajoutez l'en-tête « X-Admin-Key: votre-cle »".into(),
+        )),
+        // Confusion courante : la clé de compte posée sur une route d'administration.
+        Some(k) if k.starts_with(crate::accounts::KEY_PREFIX) => Err(AppError::Unauthorized(
+            "ces routes attendent la clé d'administration (en-tête « X-Admin-Key »), \
+             pas une clé de compte « pgw_ »"
+                .into(),
+        )),
+        Some(_) => Err(AppError::Unauthorized(
+            "clé d'administration invalide (en-tête « X-Admin-Key »)".into(),
+        )),
     }
 }
 
