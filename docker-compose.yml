@@ -68,11 +68,20 @@ services:
       # API publique (comptes + clés par utilisateur) : activée si ADMIN_API_KEY est définie.
       ADMIN_API_KEY: ${ADMIN_API_KEY:-}
       PUBLIC_SIGNUP: ${PUBLIC_SIGNUP:-false}
+      SIGNUP_PER_IP_PER_HOUR: ${SIGNUP_PER_IP_PER_HOUR:-5}
+      DEFAULT_PLAN: ${DEFAULT_PLAN:-free}
       DEFAULT_RATE_PER_MIN: ${DEFAULT_RATE_PER_MIN:-60}
       DEFAULT_MONTHLY_QUOTA: ${DEFAULT_MONTHLY_QUOTA:-10000}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
       ENABLE_DOCS: ${ENABLE_DOCS:-false}
+      # Console d'administration sur /admin/ui (création de comptes au navigateur).
+      ENABLE_ADMIN_UI: ${ENABLE_ADMIN_UI:-false}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      MAX_BODY_BYTES: ${MAX_BODY_BYTES:-1048576}
+      REQUEST_TIMEOUT_SECS: ${REQUEST_TIMEOUT_SECS:-30}
+      PRESIDIO_TIMEOUT_MS: ${PRESIDIO_TIMEOUT_MS:-4000}
+      # Toute option ajoutée au service doit être reprise ici : ce qui n'est pas
+      # dans cette liste n'atteint jamais le conteneur, même défini côté Dokploy.
       # Derrière Traefik (Dokploy) : l'IP client vient de X-Forwarded-For.
       TRUST_PROXY: "true"
       RUST_LOG: info

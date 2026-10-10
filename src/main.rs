@@ -149,9 +149,87 @@ fn run_command() -> bool {
     }
 }
 
+/// Options de configuration du service. Une variable absente des fichiers
+/// compose n'atteint jamais le conteneur, même définie côté hébergeur : le test
+/// `composes_transmettent_les_options` vérifie qu'aucune n'est oubliée.
+const OPTIONS: &[&str] = &[
+    "PSEUDO_KEY_1",
+    "PSEUDO_CURRENT_KEY_ID",
+    "PSEUDO_INDEX_KEY",
+    "MASTER_KEY",
+    "GATEWAY_API_KEY",
+    "ADMIN_API_KEY",
+    "PUBLIC_SIGNUP",
+    "SIGNUP_PER_IP_PER_HOUR",
+    "DEFAULT_PLAN",
+    "DEFAULT_RATE_PER_MIN",
+    "DEFAULT_MONTHLY_QUOTA",
+    "TRUST_PROXY",
+    "CORS_ALLOWED_ORIGINS",
+    "ENABLE_DOCS",
+    "ENABLE_ADMIN_UI",
+    "PUBLIC_BASE_URL",
+    "MAX_BODY_BYTES",
+    "REQUEST_TIMEOUT_SECS",
+    "VAULT_STORE",
+    "REDIS_URL",
+    "PRESIDIO_URL",
+    "PRESIDIO_LANG",
+    "PRESIDIO_TIMEOUT_MS",
+];
+
+/// Volontairement hors des composes : `ALLOW_INSECURE` lève la garde qui refuse
+/// de démarrer sans clé, `BIND_ADDR` et `PORT` sont imposés par la pile.
+const HORS_COMPOSE: &[&str] = &["ALLOW_INSECURE", "BIND_ADDR", "PORT"];
+
 #[cfg(test)]
 mod tests {
-    use super::auth_guard;
+    use super::{auth_guard, HORS_COMPOSE, OPTIONS};
+
+    /// Une option ajoutée au code mais oubliée dans un compose est ignorée en
+    /// silence : c'est ce qui est arrivé à ENABLE_ADMIN_UI, défini côté Dokploy
+    /// et jamais transmis au conteneur.
+    #[test]
+    fn composes_transmettent_les_options() {
+        let fichiers = [
+            ("docker-compose.yml", include_str!("../docker-compose.yml")),
+            (
+                "docker-compose.images.yml",
+                include_str!("../docker-compose.images.yml"),
+            ),
+        ];
+        for (nom, contenu) in fichiers {
+            // Les commentaires expliquent justement les exclusions : seules les
+            // lignes actives disent ce qui est réellement transmis.
+            let actives: String = contenu
+                .lines()
+                .filter(|l| !l.trim_start().starts_with('#'))
+                .collect::<Vec<_>>()
+                .join("\n");
+            for option in OPTIONS {
+                assert!(
+                    actives.contains(option),
+                    "{option} absente de {nom} : définie côté hébergeur, elle \
+                     n'atteindrait jamais le conteneur"
+                );
+            }
+            for option in HORS_COMPOSE {
+                assert!(
+                    !actives.contains(option),
+                    "{option} ne doit pas être transmise par {nom}"
+                );
+            }
+        }
+    }
+
+    /// Chaque option doit aussi être documentée pour l'exploitant.
+    #[test]
+    fn options_documentees_dans_env_example() {
+        let exemple = include_str!("../.env.example");
+        for option in OPTIONS.iter().chain(HORS_COMPOSE) {
+            assert!(exemple.contains(option), "{option} absente de .env.example");
+        }
+    }
 
     #[test]
     fn refuse_de_demarrer_sans_cle() {
