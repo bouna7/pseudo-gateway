@@ -27,9 +27,11 @@ pub enum AppError {
     /// Requête mal formée (valeur invalide côté appelant).
     #[error("requête invalide : {0}")]
     BadRequest(String),
-    /// Clé d'API manquante ou invalide (endpoint protégé).
-    #[error("clé d'API manquante ou invalide")]
-    Unauthorized,
+    /// Clé manquante ou invalide. Le texte dit **quel en-tête** cet endpoint
+    /// attend : un seul message pour les trois cas (clé oubliée, clé d'admin sur
+    /// `/v1`, clé de compte sur `/admin`) laissait l'appelant sans piste.
+    #[error("{0}")]
+    Unauthorized(String),
     /// Clé valide mais compte désactivé, ou action réservée à l'admin.
     #[error("accès refusé : {0}")]
     Forbidden(String),
@@ -66,7 +68,7 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, code) = match &self {
             AppError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
-            AppError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
+            AppError::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "unauthorized"),
             AppError::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),
             AppError::NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
             AppError::RateLimited { .. } => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
