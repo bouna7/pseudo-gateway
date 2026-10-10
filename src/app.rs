@@ -137,6 +137,17 @@ pub fn router(state: AppState, cfg: &HttpConfig) -> Router {
         if let Some(url) = &cfg.public_base_url {
             spec.servers = Some(vec![utoipa::openapi::Server::new(url)]);
         }
+        // Ne pas documenter une porte fermée : sur une instance sans inscription
+        // libre, /v1/signup répond « fonctionnalité désactivée », ce qu'un nouvel
+        // arrivant prend pour une panne.
+        if state.signup_per_hour.is_none() {
+            spec.paths.paths.remove("/v1/signup");
+        }
+        // Idem pour /admin/* : ces routes n'existent que si ADMIN_API_KEY est
+        // définie, et elles ne concernent que l'exploitant de l'instance.
+        if state.admin_key.is_none() {
+            spec.paths.paths.retain(|path, _| !path.starts_with("/admin/"));
+        }
         let spec = Arc::new(spec);
         app = app
             // Ouvrir la racine dans un navigateur donnait « endpoint inconnu »,
@@ -355,6 +366,48 @@ mod tests {
 
         let (s, spec) = call(&app, "GET", "/openapi.json", None, json!({})).await;
         assert_eq!(s, StatusCode::OK);
+        assert!(spec["paths"]["/v1/pseudonymize"].is_object());
+    }
+
+    /// Ce que voit un nouvel arrivant : une introduction qui dit comment obtenir
+    /// une clé, les endpoints utiles en tête de menu, et aucune porte fermée
+    /// documentée.
+    #[tokio::test]
+    async fn la_doc_guide_un_nouvel_arrivant() {
+        let (_, spec) = call(&app(state(0)), "GET", "/openapi.json", None, json!({})).await;
+
+        let intro = spec["info"]["description"].as_str().unwrap();
+        assert!(intro.contains("X-Api-Key"), "comment s'authentifier");
+        assert!(intro.contains("Demandez-la"), "comment obtenir une clé");
+        assert!(intro.contains("/v1/pseudonymize"), "un premier appel");
+
+        // Ordre du menu : ce qu'on vient faire d'abord, l'exploitation ensuite.
+        let tags: Vec<&str> = spec["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(tags.first(), Some(&"pseudonymisation"));
+        assert_eq!(tags.last(), Some(&"admin"));
+
+        // Inscription ouverte dans cet état de test : elle est documentée.
+        assert!(spec["paths"]["/v1/signup"].is_object());
+
+        // Instance sans inscription ni admin : ces portes ne sont plus documentées.
+        let mut st = state(0);
+        st.signup_per_hour = None;
+        st.admin_key = None;
+        let depouille = router(
+            st,
+            &HttpConfig {
+                docs: true,
+                ..Default::default()
+            },
+        );
+        let (_, spec) = call(&depouille, "GET", "/openapi.json", None, json!({})).await;
+        assert!(spec["paths"]["/v1/signup"].is_null());
+        assert!(spec["paths"]["/admin/accounts"].is_null());
         assert!(spec["paths"]["/v1/pseudonymize"].is_object());
     }
 

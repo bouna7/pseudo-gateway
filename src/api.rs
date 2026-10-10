@@ -251,7 +251,69 @@ impl Modify for SecuritySchemes {
 #[openapi(
     info(
         title = "pseudo-gateway",
-        description = "Pseudonymisation chiffrée (AES-256-GCM) des données sensibles avant envoi à un LLM, et restitution au retour."
+        // Première chose que lit un nouvel arrivant : elle doit répondre « à quoi
+        // ça sert », « comment j'obtiens une clé » et « montre-moi un exemple »,
+        // sans supposer qu'on connaisse déjà la pseudonymisation.
+        description = r#"
+Protège les données personnelles **avant** qu'elles ne partent vers une IA
+(OpenAI, Anthropic…), et les restitue au retour.
+
+Le principe est celui d'un vestiaire : vous déposez les données sensibles, vous
+recevez des jetons numérotés, l'IA travaille sur le texte avec les jetons, et
+vous récupérez les vraies valeurs à la sortie. L'IA ne voit jamais qui sont les
+personnes ; les valeurs réelles restent chiffrées (AES-256-GCM) de notre côté.
+
+```text
+"Marie Dupont (marie@exemple.fr) a signé."   ← votre texte
+            ↓  POST /v1/pseudonymize
+"[PERSON_1] ([EMAIL_1]) a signé."            ← ce que vous envoyez à l'IA
+            ↓  réponse de l'IA, contenant les mêmes jetons
+"J'ai répondu à [PERSON_1] sur [EMAIL_1]."
+            ↓  POST /v1/depseudonymize
+"J'ai répondu à Marie Dupont sur marie@exemple.fr."
+```
+
+## Obtenir une clé
+
+Les deux endpoints exigent une clé d'API, à placer dans l'en-tête
+`X-Api-Key` (ou `Authorization: Bearer …`). **Demandez-la à l'exploitant de
+cette instance** : les clés sont créées à la main, il n'y a pas d'inscription
+automatique. Une clé ressemble à `pgw_…` et n'est affichée qu'une seule fois.
+
+## Premier appel
+
+```bash
+curl -X POST https://exemple/v1/pseudonymize \
+  -H "X-Api-Key: pgw_votre_cle" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Marie Dupont (marie@exemple.fr) a signé."}'
+```
+
+Sont détectés automatiquement : e-mails, téléphones, IBAN, cartes bancaires,
+ainsi que noms, villes et organisations. Un terme que la détection ignore peut
+être fourni dans `custom_terms`.
+
+## À savoir
+
+- **Une même valeur reçoit toujours le même jeton** : `[PERSON_1]` désigne la
+  même personne d'un appel à l'autre, ce qui permet à l'IA de garder le fil.
+- **Cloisonnement** : vos jetons ne sont lisibles qu'avec votre clé. Le champ
+  facultatif `tenant_id` cloisonne davantage, par dossier ou par client.
+- **Limites** : au-delà de votre quota, la réponse est un `429` avec un en-tête
+  `Retry-After`. `GET /v1/me` indique votre consommation du mois.
+- **Encodage** : le corps doit être en UTF-8, comme l'exige le format JSON.
+- Ce n'est **pas** une confidentialité totale : le texte non sensible part quand
+  même vers l'IA, et un document très contextuel peut parfois permettre de
+  deviner de qui l'on parle.
+"#
+    ),
+    // L'ordre des tags est celui du menu : ce qu'on vient faire d'abord, les
+    // routes d'exploitation à la fin.
+    tags(
+        (name = "pseudonymisation", description = "Masquer puis restituer les données sensibles."),
+        (name = "compte", description = "Votre compte et votre consommation."),
+        (name = "système", description = "Disponibilité du service."),
+        (name = "admin", description = "Gestion des comptes et des clés (réservé à l'exploitant).")
     ),
     paths(
         health, pseudonymize, depseudonymize, me, signup,
