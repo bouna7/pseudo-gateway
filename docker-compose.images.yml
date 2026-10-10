@@ -54,14 +54,28 @@ services:
       # démarrer (/depseudonymize restitue des données réelles).
       GATEWAY_API_KEY: ${GATEWAY_API_KEY:-}
       ADMIN_API_KEY: ${ADMIN_API_KEY:-}
+      # Repli clé unique, si vous n'utilisez pas PSEUDO_KEY_*.
+      MASTER_KEY: ${MASTER_KEY:-}
       # API publique (comptes, clés, quotas) : active si ADMIN_API_KEY est définie.
       PUBLIC_SIGNUP: ${PUBLIC_SIGNUP:-false}
+      SIGNUP_PER_IP_PER_HOUR: ${SIGNUP_PER_IP_PER_HOUR:-5}
+      DEFAULT_PLAN: ${DEFAULT_PLAN:-free}
       DEFAULT_RATE_PER_MIN: ${DEFAULT_RATE_PER_MIN:-60}
       DEFAULT_MONTHLY_QUOTA: ${DEFAULT_MONTHLY_QUOTA:-10000}
       # HTTP.
       ENABLE_DOCS: ${ENABLE_DOCS:-false}
+      # Console d'administration sur /admin/ui (création de comptes au navigateur).
+      ENABLE_ADMIN_UI: ${ENABLE_ADMIN_UI:-false}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
+      MAX_BODY_BYTES: ${MAX_BODY_BYTES:-1048576}
+      REQUEST_TIMEOUT_SECS: ${REQUEST_TIMEOUT_SECS:-30}
+      PRESIDIO_TIMEOUT_MS: ${PRESIDIO_TIMEOUT_MS:-4000}
+      # ALLOW_INSECURE n'est VOLONTAIREMENT pas transmis : il desactive la garde
+      # qui refuse de demarrer sans clé. Il n'a pas sa place dans un déploiement.
+      #
+      # Toute option ajoutée au service doit être reprise ici : ce qui n'est pas
+      # dans cette liste n'atteint jamais le conteneur, même défini côté Dokploy.
     expose:
       - "8080"
     depends_on:
