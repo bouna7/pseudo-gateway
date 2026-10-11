@@ -85,10 +85,18 @@ fn explique_cle_api(presentee: Option<&str>) -> AppError {
 }
 
 async fn resolve(st: &AppState, headers: &HeaderMap, count: bool) -> Result<Principal, AppError> {
+    resolve_cle(st, presented_key(headers, "x-api-key"), count).await
+}
+
+async fn resolve_cle(
+    st: &AppState,
+    presentee: Option<&str>,
+    count: bool,
+) -> Result<Principal, AppError> {
     if st.open_mode() {
         return Ok(Principal::Internal);
     }
-    let key = presented_key(headers, "x-api-key").ok_or_else(|| explique_cle_api(None))?;
+    let key = presentee.ok_or_else(|| explique_cle_api(None))?;
     if let Some(expected) = &st.api_key {
         if ct_eq(key, expected) {
             return Ok(Principal::Internal);
@@ -119,6 +127,39 @@ pub async fn require_api_key(
     Ok(next.run(req).await)
 }
 
+/// Garde du proxy de filtrage : la clé de la passerelle est lue **uniquement**
+/// dans `X-Api-Key`.
+///
+/// Pourquoi ne pas accepter `Authorization: Bearer` ici, contrairement au reste
+/// de l'API : sur le proxy, cet en-tête porte la clé du fournisseur que
+/// l'appelant veut joindre (`sk-…`). La lire comme une clé de passerelle la
+/// refuserait systématiquement, avec un message incompréhensible — et surtout,
+/// la moindre confusion entre les deux reviendrait à relayer la clé de la
+/// passerelle à un tiers.
+pub async fn require_proxy_key(
+    State(st): State<AppState>,
+    mut req: Request,
+    next: Next,
+) -> Result<Response, AppError> {
+    let cle = req
+        .headers()
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|k| !k.is_empty());
+    let principal = match resolve_cle(&st, cle, true).await {
+        Err(AppError::Unauthorized(_)) if cle.is_none() => Err(AppError::Unauthorized(
+            "clé de passerelle manquante : ajoutez l'en-tête « X-Api-Key: pgw_… ». \
+             Sur le proxy, « Authorization » est réservé à la clé de votre \
+             fournisseur, relayée telle quelle et jamais interprétée ici."
+                .to_string(),
+        )),
+        autre => autre,
+    }?;
+    req.extensions_mut().insert(principal);
+    Ok(next.run(req).await)
+}
+
 /// Garde des endpoints d'information (`/v1/me`) : authentifie sans décompter.
 pub async fn require_api_key_uncounted(
     State(st): State<AppState>,
@@ -144,7 +185,10 @@ pub async fn require_admin(
     // démarrage (puis modifiable depuis la console), dont seule l'empreinte est
     // conservée.
     if let Some(k) = presentee {
-        let config = st.admin_key.as_ref().is_some_and(|attendue| ct_eq(k, attendue));
+        let config = st
+            .admin_key
+            .as_ref()
+            .is_some_and(|attendue| ct_eq(k, attendue));
         let stockee = match &st.accounts {
             Some(accounts) => accounts.admin_key_matches(k).await?,
             None => false,
@@ -204,7 +248,10 @@ mod tests {
     fn cle_depuis_x_api_key_ou_bearer() {
         let mut h = HeaderMap::new();
         assert_eq!(presented_key(&h, "x-api-key"), None);
-        h.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer abc"));
+        h.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer abc"),
+        );
         assert_eq!(presented_key(&h, "x-api-key"), Some("abc"));
         h.insert("x-api-key", HeaderValue::from_static("xyz"));
         assert_eq!(presented_key(&h, "x-api-key"), Some("xyz"));
@@ -214,7 +261,10 @@ mod tests {
     fn ip_client_derriere_proxy() {
         let peer: SocketAddr = "10.0.0.2:5000".parse().unwrap();
         let mut h = HeaderMap::new();
-        h.insert("x-forwarded-for", HeaderValue::from_static("6.6.6.6, 1.2.3.4"));
+        h.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("6.6.6.6, 1.2.3.4"),
+        );
         assert_eq!(client_ip(&h, Some(peer), true), "1.2.3.4");
         assert_eq!(client_ip(&h, Some(peer), false), "10.0.0.2");
     }

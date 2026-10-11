@@ -77,6 +77,9 @@ services:
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
       MAX_BODY_BYTES: ${MAX_BODY_BYTES:-1048576}
       REQUEST_TIMEOUT_SECS: ${REQUEST_TIMEOUT_SECS:-30}
+      # Proxy de filtrage : hotes joignables (none = proxy eteint).
+      PROXY_ALLOWED_HOSTS: ${PROXY_ALLOWED_HOSTS:-}
+      PROXY_TIMEOUT_SECS: ${PROXY_TIMEOUT_SECS:-120}
       PRESIDIO_TIMEOUT_MS: ${PRESIDIO_TIMEOUT_MS:-4000}
       # ALLOW_INSECURE n'est VOLONTAIREMENT pas transmis : il desactive la garde
       # qui refuse de demarrer sans clé. Il n'a pas sa place dans un déploiement.

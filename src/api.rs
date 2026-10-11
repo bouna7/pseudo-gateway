@@ -133,18 +133,8 @@ pub async fn pseudonymize(
         })
         .collect();
 
-    // 2) Détection automatique (NER) via Presidio. Best effort : si le service est
-    //    indisponible, on continue avec la regex + les termes manuels.
-    match ner::analyze(&req.text).await {
-        Ok(entities) => {
-            for (typ, value) in ner::to_terms(&req.text, &entities) {
-                terms.push(CustomTerm { typ, value });
-            }
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "NER (Presidio) indisponible — repli regex + termes manuels")
-        }
-    }
+    // 2) Détection automatique (NER) via Presidio, best effort.
+    ner::enrichir(&req.text, &mut terms).await;
 
     // 3) Jetonnage + chiffrement (la synchronisation vit dans le store).
     let (text, tokens) = st.vault.pseudonymize(&tenant, &req.text, &terms).await?;
@@ -217,8 +207,8 @@ pub async fn signup(
             .signup_invite_code
             .as_ref()
             .is_some_and(|attendu| crate::auth::ct_eq(fourni, attendu));
-        let valide = permanent
-            || (!fourni.is_empty() && accounts.consume_invitation(fourni).await?);
+        let valide =
+            permanent || (!fourni.is_empty() && accounts.consume_invitation(fourni).await?);
         if !valide {
             return Err(AppError::Forbidden(
                 "invitation absente, invalide, expirée ou déjà utilisée — demandez \
@@ -322,6 +312,20 @@ curl -X POST https://exemple/v1/pseudonymize \
 Sont détectés automatiquement : e-mails, téléphones, IBAN, cartes bancaires,
 ainsi que noms, villes et organisations. Un terme que la détection ignore peut
 être fourni dans `custom_terms`.
+
+## Sans écrire de code : le proxy de filtrage
+
+Si vous appelez déjà une API (OpenAI ou compatible), vous pouvez ne rien
+changer d'autre que son URL de base :
+
+```
+https://exemple/proxy/api.openai.com/v1/chat/completions
+```
+
+La passerelle masque le corps, relaie l'appel, et restitue les vraies valeurs
+dans la réponse. `X-Api-Key` porte la clé de cette passerelle ;
+`Authorization` porte la clé de **votre** fournisseur, relayée telle quelle et
+jamais interprétée ici. Les réponses en flux (SSE) sont prises en charge.
 
 ## À savoir
 

@@ -96,6 +96,26 @@ fn char_slice(text: &str, start_char: usize, end_char: usize) -> Option<String> 
     Some(text[start_byte..end_byte].to_string())
 }
 
+/// Ajoute à `terms` ce que la détection automatique trouve dans `text`.
+///
+/// **Best effort assumé** : si Presidio est absent ou en panne, on continue avec
+/// les détecteurs à format strict (regex) et les termes fournis, plutôt que de
+/// refuser la requête. Les deux appelants (l'endpoint `/v1/pseudonymize` et le
+/// proxy de filtrage) passent par ici, pour qu'un texte soit masqué de la même
+/// façon quel que soit le chemin emprunté.
+pub async fn enrichir(text: &str, terms: &mut Vec<crate::pseudonymize::CustomTerm>) {
+    match analyze(text).await {
+        Ok(entities) => {
+            for (typ, value) in to_terms(text, &entities) {
+                terms.push(crate::pseudonymize::CustomTerm { typ, value });
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "NER (Presidio) indisponible — repli regex + termes manuels")
+        }
+    }
+}
+
 /// Convertit les entités Presidio en couples (type interne, valeur réelle),
 /// prêts à être jetonnés comme des `custom_terms`.
 pub fn to_terms(text: &str, entities: &[PresidioEntity]) -> Vec<(String, String)> {

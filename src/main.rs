@@ -24,6 +24,7 @@ mod error;
 mod extract;
 mod keys;
 mod ner;
+mod proxy;
 mod pseudonymize;
 mod store;
 
@@ -55,7 +56,8 @@ fn env_parse<T: std::str::FromStr>(name: &str, default: T) -> T {
 }
 
 fn env_flag(name: &str) -> bool {
-    env_opt(name).is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+    env_opt(name)
+        .is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
 }
 
 /// Refuse de démarrer sans aucune clé : `/depseudonymize` restitue des données
@@ -78,10 +80,12 @@ fn auth_guard(
     if allow_insecure {
         return Ok(true);
     }
-    Err("aucune clé d'authentification. Définissez GATEWAY_API_KEY (vos propres \
+    Err(
+        "aucune clé d'authentification. Définissez GATEWAY_API_KEY (vos propres \
          services) et/ou ADMIN_API_KEY (API publique : comptes, clés, quotas). \
          Pour un usage LOCAL sans protection, ALLOW_INSECURE=true. \
-         Générer des secrets : pseudo-gateway gen-keys")
+         Générer des secrets : pseudo-gateway gen-keys",
+    )
 }
 
 fn fail(msg: &str, err: impl std::fmt::Display) -> ! {
@@ -177,6 +181,8 @@ const OPTIONS: &[&str] = &[
     "PUBLIC_BASE_URL",
     "MAX_BODY_BYTES",
     "REQUEST_TIMEOUT_SECS",
+    "PROXY_ALLOWED_HOSTS",
+    "PROXY_TIMEOUT_SECS",
     "VAULT_STORE",
     "REDIS_URL",
     "PRESIDIO_URL",
@@ -291,8 +297,13 @@ async fn main() {
                 (Arc::new(vault), Arc::new(accts))
             }
             _ => {
-                tracing::warn!("coffre EN MÉMOIRE (non persistant) — VAULT_STORE=redis pour la prod");
-                (Arc::new(InMemoryVaultStore::new()), Arc::new(InMemoryAccountStore::new()))
+                tracing::warn!(
+                    "coffre EN MÉMOIRE (non persistant) — VAULT_STORE=redis pour la prod"
+                );
+                (
+                    Arc::new(InMemoryVaultStore::new()),
+                    Arc::new(InMemoryAccountStore::new()),
+                )
             }
         };
 
@@ -348,7 +359,10 @@ async fn main() {
     let signup_per_hour = match (env_flag("PUBLIC_SIGNUP"), accounts.is_some()) {
         (true, true) => {
             let n = env_parse("SIGNUP_PER_IP_PER_HOUR", 5u64);
-            tracing::info!(per_ip_per_hour = n, "inscription publique ouverte (/v1/signup)");
+            tracing::info!(
+                per_ip_per_hour = n,
+                "inscription publique ouverte (/v1/signup)"
+            );
             Some(n)
         }
         (true, false) => {
@@ -361,7 +375,11 @@ async fn main() {
     if api_key.is_some() {
         tracing::info!("clé d'API interne activée (X-Api-Key / Bearer)");
     }
-    match auth_guard(api_key.is_some(), accounts.is_some(), env_flag("ALLOW_INSECURE")) {
+    match auth_guard(
+        api_key.is_some(),
+        accounts.is_some(),
+        env_flag("ALLOW_INSECURE"),
+    ) {
         Ok(true) => tracing::warn!(
             "ALLOW_INSECURE=true — endpoints NON protégés : /depseudonymize rend \
              des données réelles à quiconque atteint ce port"
@@ -371,6 +389,14 @@ async fn main() {
     }
 
     let trust_proxy = env_flag("TRUST_PROXY");
+    let proxy_hosts = proxy::hotes_autorises(env_opt("PROXY_ALLOWED_HOSTS").as_deref());
+    match &proxy_hosts {
+        Some(hotes) => tracing::info!(
+            cibles = hotes.len(),
+            "proxy de filtrage actif sur /proxy/<hôte>/<chemin>"
+        ),
+        None => tracing::info!("proxy de filtrage désactivé (PROXY_ALLOWED_HOSTS=none)"),
+    }
     let state = AppState {
         vault: Arc::new(Vault::new(keyring, store)),
         api_key,
@@ -380,9 +406,14 @@ async fn main() {
         signup_invite_code: env_opt("SIGNUP_INVITE_CODE").map(Arc::new),
         // Par defaut une invitation est exigee : ouvrir l'inscription a tout
         // venant doit etre un choix explicite.
-        signup_require_invite: !matches!(env_opt("SIGNUP_REQUIRE_INVITE").as_deref(), Some("false" | "0" | "no" | "off")),
+        signup_require_invite: !matches!(
+            env_opt("SIGNUP_REQUIRE_INVITE").as_deref(),
+            Some("false" | "0" | "no" | "off")
+        ),
         public_base_url: env_opt("PUBLIC_BASE_URL"),
         trust_proxy,
+        proxy_hosts: proxy_hosts.clone().map(Arc::new),
+        proxy_timeout: Duration::from_secs(env_parse("PROXY_TIMEOUT_SECS", 120)),
     };
 
     let http = HttpConfig {
@@ -416,7 +447,10 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .unwrap_or_else(|e| fail(&format!("impossible d'écouter sur {addr}"), e));
-    tracing::info!(version = env!("CARGO_PKG_VERSION"), "Passerelle de pseudonymisation prête sur http://{addr}");
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        "Passerelle de pseudonymisation prête sur http://{addr}"
+    );
     if let Err(e) = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),

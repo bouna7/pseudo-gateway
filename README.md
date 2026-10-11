@@ -116,6 +116,80 @@ Renvoie `{ "text": "...jetons...", "tokens": [...] }`.
 
 Renvoie `{ "text": "...valeurs réelles..." }`.
 
+## Proxy de filtrage : branchez-la devant votre API
+
+Les deux endpoints ci-dessus demandent d'écrire du code : masquer, appeler le
+modèle, restituer. Le proxy supprime cette étape — **vous ne changez que l'URL
+de base de votre client**.
+
+```
+POST https://votre-passerelle/proxy/api.openai.com/v1/chat/completions
+```
+
+La passerelle masque le corps, relaie l'appel vers
+`https://api.openai.com/v1/chat/completions`, puis restitue les vraies valeurs
+dans la réponse. Votre application envoie et relit exactement ce qu'elle
+envoyait et relisait avant.
+
+Le partage des deux en-têtes est le point à retenir :
+
+| En-tête | Contenu | Devenir |
+|---|---|---|
+| `X-Api-Key` | clé de cette passerelle (`pgw_…`) | consommée ici, **jamais relayée** |
+| `Authorization` | clé de votre fournisseur (`sk-…`) | relayée telle quelle, jamais lue |
+| `X-Tenant-Id` | *(optionnel)* cloisonne les jetons par dossier | consommé ici |
+
+Exemple complet, avec `curl` :
+
+```bash
+curl -s https://votre-passerelle/proxy/api.openai.com/v1/chat/completions \
+  -H "X-Api-Key: pgw_votre_cle_passerelle" \
+  -H "Authorization: Bearer sk-votre_cle_openai" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4o","messages":[{"role":"user",
+       "content":"Résume le profil de Marie Dupont (marie@exemple.fr)"}]}'
+```
+
+OpenAI reçoit `[PERSON_1] ([EMAIL_1])` ; vous relisez « Marie Dupont ».
+
+En Java (LangChain4j), en Python (SDK OpenAI) ou ailleurs, c'est la même chose :
+
+```java
+OpenAiChatModel.builder()
+    .baseUrl("https://votre-passerelle/proxy/api.openai.com/v1")  // seule ligne ajoutée
+    .apiKey(System.getenv("OPENAI_API_KEY"))                      // inchangée
+    .modelName("gpt-4o")
+    .build();
+```
+
+```python
+OpenAI(base_url="https://votre-passerelle/proxy/api.openai.com/v1",
+       api_key=os.environ["OPENAI_API_KEY"],
+       default_headers={"X-Api-Key": "pgw_votre_cle_passerelle"})
+```
+
+Ce qu'il faut savoir avant de s'en servir :
+
+- **Corps inspectés** : JSON et `text/*`. Un corps que le filtre ne sait pas
+  lire (`multipart`, binaire) est **refusé (415)**, jamais relayé en clair : un
+  filtre qui laisse passer ce qu'il ne comprend pas ne filtre pas.
+- **Champs épargnés** : `model`, `stop`, `name`, les identifiants et les URL.
+  Les masquer casserait l'appel. Tout le reste du texte libre est inspecté.
+- **Réponses en flux (SSE)** : prises en charge. Un jeton coupé en deux par la
+  découpe réseau est recollé avant restitution.
+- **Cibles joignables** : liste fermée (`PROXY_ALLOWED_HOSTS`), par défaut les
+  API publiques de modèles et la boucle locale. Les adresses internes restent
+  refusées même en mode `*` — sans quoi la passerelle servirait de relais vers
+  le réseau de l'hébergeur et vers les services de métadonnées des clouds.
+- **Délai** : `PROXY_TIMEOUT_SECS` (120 s par défaut), indépendant du
+  `REQUEST_TIMEOUT_SECS` du reste de l'API, qu'une génération dépasse souvent.
+- `PROXY_ALLOWED_HOSTS=none` éteint complètement le proxy.
+- La détection reste la même que sur `/v1/pseudonymize` — avec sa limite : un
+  nom **isolé sur sa ligne** (en-tête de CV) échappe au modèle NER. Par le
+  proxy, il n'y a pas d'endroit pour fournir les identités connues de votre
+  application ; si cette garantie compte, appelez `/v1/pseudonymize` avec
+  `custom_terms`.
+
 ## Données détectées automatiquement
 
 Deux niveaux de détection :

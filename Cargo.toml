@@ -14,9 +14,17 @@ regex = "1"
 once_cell = "1"
 hex = "0.4"
 rand = "0.8"
-# Client HTTP pour appeler le service NER Presidio. default-features = false
-# évite la dépendance TLS/OpenSSL (on ne tape que du http://localhost).
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
+# Client HTTP : service NER Presidio (http://localhost) et proxy de filtrage
+# vers les API tierces (https). rustls-tls embarque les autorités de
+# certification : l'image distroless n'a pas de magasin système, un TLS adossé à
+# OpenSSL y échouerait sur « unable to get local issuer certificate ».
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+    "stream",
+] }
+# Réponses en flux (SSE) relayées par le proxy sans tout charger en mémoire.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # Déduplication sans clair : blind index = HMAC-SHA256 de la valeur.
 hmac = "0.12"
 sha2 = "0.10"

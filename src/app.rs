@@ -2,11 +2,11 @@
 
 use crate::accounts::Accounts;
 use crate::pseudonymize::Vault;
-use crate::{admin, api, auth};
+use crate::{admin, api, auth, proxy};
 use axum::extract::DefaultBodyLimit;
 use axum::http::{header, HeaderName, HeaderValue, Method};
 use axum::middleware::from_fn_with_state;
-use axum::routing::{delete, get, post};
+use axum::routing::{any, delete, get, post};
 use axum::{Json, Router};
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,6 +36,12 @@ pub struct AppState {
     pub public_base_url: Option<String>,
     /// Lire l'IP client dans `X-Forwarded-For` (derrière Traefik / nginx).
     pub trust_proxy: bool,
+    /// Hôtes joignables par le proxy de filtrage (`PROXY_ALLOWED_HOSTS`).
+    /// `None` = proxy éteint.
+    pub proxy_hosts: Option<Arc<Vec<String>>>,
+    /// Délai d'un appel relayé : un modèle met couramment plus de 30 s à
+    /// répondre, bien au-delà du `REQUEST_TIMEOUT_SECS` du reste de l'API.
+    pub proxy_timeout: Duration,
 }
 
 impl AppState {
@@ -117,6 +123,7 @@ fn cors_layer(origins: &[String]) -> CorsLayer {
             header::AUTHORIZATION,
             HeaderName::from_static("x-api-key"),
             HeaderName::from_static("x-admin-key"),
+            HeaderName::from_static("x-tenant-id"),
         ])
         .expose_headers([header::RETRY_AFTER])
         .max_age(Duration::from_secs(3600));
@@ -169,7 +176,11 @@ pub fn router(state: AppState, cfg: &HttpConfig) -> Router {
             // Le même critère que la vérification à l'inscription : sinon la page
             // cache le champ alors que le serveur réclame une invitation, et
             // l'utilisateur se heurte à un refus sans pouvoir rien y faire.
-            if state.signup_require_invite { "oui" } else { "non" },
+            if state.signup_require_invite {
+                "oui"
+            } else {
+                "non"
+            },
         ));
         app = app.route(
             "/signup",
@@ -197,7 +208,10 @@ pub fn router(state: AppState, cfg: &HttpConfig) -> Router {
             .route("/admin/invitations/:code", delete(admin::revoke_invitation))
             .route("/admin/key", post(admin::rotate_admin_key))
             .route("/admin/accounts/:id/keys", post(admin::issue_key))
-            .route("/admin/accounts/:id/keys/:key_id", delete(admin::revoke_key))
+            .route(
+                "/admin/accounts/:id/keys/:key_id",
+                delete(admin::revoke_key),
+            )
             .route_layer(from_fn_with_state(state.clone(), auth::require_admin));
         app = app.merge(admin_routes);
 
@@ -226,7 +240,9 @@ pub fn router(state: AppState, cfg: &HttpConfig) -> Router {
         // Idem pour /admin/* : ces routes n'existent que si ADMIN_API_KEY est
         // définie, et elles ne concernent que l'exploitant de l'instance.
         if !state.admin_enabled() {
-            spec.paths.paths.retain(|path, _| !path.starts_with("/admin/"));
+            spec.paths
+                .paths
+                .retain(|path, _| !path.starts_with("/admin/"));
         }
         let spec = Arc::new(spec);
         app = app
@@ -278,15 +294,42 @@ pub fn router(state: AppState, cfg: &HttpConfig) -> Router {
 
     let mut app = app
         // Route inconnue / mauvaise méthode : même format d'erreur que le reste.
-        .fallback(|method: axum::http::Method, uri: axum::http::Uri| async move {
-            crate::error::AppError::UnknownRoute(format!("{method} {}", uri.path()))
-        })
-        .method_not_allowed_fallback(|method: axum::http::Method, uri: axum::http::Uri| async move {
-            crate::error::AppError::MethodNotAllowed(format!("{method} {}", uri.path()))
-        })
-        .with_state(state)
+        .fallback(
+            |method: axum::http::Method, uri: axum::http::Uri| async move {
+                crate::error::AppError::UnknownRoute(format!("{method} {}", uri.path()))
+            },
+        )
+        .method_not_allowed_fallback(
+            |method: axum::http::Method, uri: axum::http::Uri| async move {
+                crate::error::AppError::MethodNotAllowed(format!("{method} {}", uri.path()))
+            },
+        )
+        .with_state(state.clone())
         .layer(DefaultBodyLimit::max(cfg.max_body_bytes))
         .layer(TimeoutLayer::new(cfg.request_timeout));
+
+    // Le proxy est monté à part : un appel relayé attend la réponse d'un modèle,
+    // couramment plus longue que le `REQUEST_TIMEOUT_SECS` du reste de l'API.
+    // Sous la même couche de délai, chaque génération un peu longue serait
+    // coupée à 30 s.
+    if state.proxy_hosts.is_some() {
+        let relais = Router::new()
+            .route("/proxy/*cible", any(proxy::relayer))
+            .route_layer(from_fn_with_state(state.clone(), auth::require_proxy_key));
+        let proxy = Router::new()
+            // Sans cible : on explique la forme attendue plutôt que de répondre
+            // « endpoint inconnu », qui ne dit pas quoi corriger.
+            .route("/proxy", any(proxy::mode_emploi))
+            .merge(relais)
+            .with_state(state.clone())
+            .layer(DefaultBodyLimit::max(cfg.max_body_bytes))
+            // Marge au-dessus du délai de l'appel sortant : c'est lui qui doit
+            // expirer le premier, pour répondre « délai dépassé » avec la cible.
+            .layer(TimeoutLayer::new(
+                state.proxy_timeout + Duration::from_secs(5),
+            ));
+        app = app.merge(proxy);
+    }
     if let Some(origins) = &cfg.cors_origins {
         // En dernier = couche la plus externe : répond aux pré-requêtes OPTIONS
         // avant l'authentification.
@@ -329,6 +372,9 @@ mod tests {
             signup_require_invite: false,
             public_base_url: None,
             trust_proxy: false,
+            // Les tests du proxy visent une cible locale qu'ils lancent eux-mêmes.
+            proxy_hosts: Some(Arc::new(vec!["127.0.0.1".to_string()])),
+            proxy_timeout: Duration::from_secs(5),
         }
     }
 
@@ -343,7 +389,13 @@ mod tests {
         )
     }
 
-    async fn call(app: &Router, method: &str, uri: &str, auth: Option<(&str, &str)>, body: Value) -> (StatusCode, Value) {
+    async fn call(
+        app: &Router,
+        method: &str,
+        uri: &str,
+        auth: Option<(&str, &str)>,
+        body: Value,
+    ) -> (StatusCode, Value) {
         let mut req = Request::builder()
             .method(method)
             .uri(uri)
@@ -358,7 +410,204 @@ mod tests {
             .unwrap();
         let status = resp.status();
         let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    /// Lance une fausse API cible sur la boucle locale et renvoie son port.
+    async fn cible(routes: Router) -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, routes).await;
+        });
+        port
+    }
+
+    /// Crée un compte et renvoie sa clé.
+    async fn compte(app: &Router) -> String {
+        let (_, a) = call(
+            app,
+            "POST",
+            "/admin/accounts",
+            Some(("x-admin-key", "admin")),
+            json!({"name": "A"}),
+        )
+        .await;
+        a["api_key"].as_str().unwrap().to_string()
+    }
+
+    /// Le cœur de la promesse « branchez-le devant votre API » : le fournisseur
+    /// ne voit que des jetons, l'appelant ne voit que des valeurs réelles, et
+    /// aucune des deux clés ne part du mauvais côté.
+    #[tokio::test]
+    async fn proxy_masque_a_l_aller_et_restitue_au_retour() {
+        std::env::set_var("PRESIDIO_URL", "http://127.0.0.1:1"); // NER indisponible → regex
+        let vu = Arc::new(std::sync::Mutex::new(
+            None::<(String, axum::http::HeaderMap)>,
+        ));
+        let note = vu.clone();
+        let port = cible(Router::new().route(
+            "/v1/chat/completions",
+            post(move |entetes: axum::http::HeaderMap, corps: String| {
+                let note = note.clone();
+                async move {
+                    *note.lock().unwrap() = Some((corps.clone(), entetes));
+                    // Le modèle répond en reprenant ce qu'il a reçu : c'est la
+                    // façon la plus directe de vérifier ce qu'il a vu.
+                    let recu: Value = serde_json::from_str(&corps).unwrap();
+                    let texte = recu["messages"][0]["content"].as_str().unwrap();
+                    Json(json!({
+                        "model": "gpt-4o",
+                        "choices": [{"message": {"role": "assistant", "content": format!("Vu : {texte}")}}]
+                    }))
+                }
+            }),
+        ))
+        .await;
+
+        let app = app(state(0));
+        let cle = compte(&app).await;
+        let requete = Request::builder()
+            .method("POST")
+            .uri(format!("/proxy/127.0.0.1:{port}/v1/chat/completions"))
+            .header("content-type", "application/json")
+            .header("x-api-key", &cle)
+            .header("authorization", "Bearer sk-du-client")
+            .body(Body::from(
+                json!({
+                    "model": "gpt-4o",
+                    "messages": [{"role": "user", "content": "Écrire à marie@exemple.fr"}]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let reponse = app.clone().oneshot(requete).await.unwrap();
+        assert_eq!(reponse.status(), StatusCode::OK);
+        let corps: Value =
+            serde_json::from_slice(&to_bytes(reponse.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+
+        let (corps_vu, entetes_vus) = vu.lock().unwrap().clone().unwrap();
+        // 1) Le fournisseur n'a jamais vu l'adresse réelle.
+        assert!(
+            !corps_vu.contains("marie@exemple.fr"),
+            "adresse envoyée en clair au fournisseur : {corps_vu}"
+        );
+        assert!(corps_vu.contains("[EMAIL_1]"), "{corps_vu}");
+        // 2) Les champs techniques sont intacts : masquer « model » casserait l'appel.
+        assert!(corps_vu.contains("gpt-4o"), "{corps_vu}");
+        // 3) Sa clé lui parvient ; la clé de la passerelle ne sort pas d'ici.
+        assert_eq!(
+            entetes_vus.get("authorization").unwrap(),
+            "Bearer sk-du-client"
+        );
+        assert!(entetes_vus.get("x-api-key").is_none());
+        // 4) L'appelant, lui, relit la vraie valeur sans rien faire.
+        assert_eq!(
+            corps["choices"][0]["message"]["content"],
+            "Vu : Écrire à marie@exemple.fr"
+        );
+    }
+
+    /// Un jeton coupé par la découpe réseau doit être recollé avant restitution,
+    /// sinon le lecteur d'un flux voit passer « [EMA » puis « IL_1] ».
+    #[tokio::test]
+    async fn proxy_restitue_un_flux_sse_meme_jeton_coupe_en_deux() {
+        std::env::set_var("PRESIDIO_URL", "http://127.0.0.1:1");
+        let port = cible(Router::new().route(
+            "/flux",
+            get(|| async {
+                let morceaux = vec![
+                    Ok::<_, std::io::Error>(axum::body::Bytes::from("data: Voici [EMA")),
+                    Ok(axum::body::Bytes::from("IL_1] — fin\n\n")),
+                ];
+                axum::response::Response::builder()
+                    .header("content-type", "text/event-stream")
+                    .body(Body::from_stream(futures_util::stream::iter(morceaux)))
+                    .unwrap()
+            }),
+        ))
+        .await;
+
+        let app = app(state(0));
+        let cle = compte(&app).await;
+        // Le jeton EMAIL_1 doit exister dans l'espace du compte : on le crée en
+        // pseudonymisant, exactement comme le ferait la requête aller.
+        let (s, p) = call(
+            &app,
+            "POST",
+            "/v1/pseudonymize",
+            Some(("x-api-key", &cle)),
+            json!({"text": "Écrire à marie@exemple.fr"}),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(p["text"], "Écrire à [EMAIL_1]");
+
+        let requete = Request::builder()
+            .method("GET")
+            .uri(format!("/proxy/127.0.0.1:{port}/flux"))
+            .header("x-api-key", &cle)
+            .body(Body::empty())
+            .unwrap();
+        let reponse = app.clone().oneshot(requete).await.unwrap();
+        assert_eq!(reponse.status(), StatusCode::OK);
+        let recu = to_bytes(reponse.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&recu),
+            "data: Voici marie@exemple.fr — fin\n\n"
+        );
+    }
+
+    /// Les deux refus qui protègent la promesse : une cible non autorisée (le
+    /// proxy n'est pas un relais ouvert) et un corps non inspectable (plutôt
+    /// refuser que relayer en clair).
+    #[tokio::test]
+    async fn proxy_refuse_cible_inconnue_et_corps_non_inspectable() {
+        std::env::set_var("PRESIDIO_URL", "http://127.0.0.1:1");
+        let app = app(state(0));
+        let cle = compte(&app).await;
+
+        let hors_liste = Request::builder()
+            .method("POST")
+            .uri("/proxy/api.openai.com/v1/chat/completions")
+            .header("content-type", "application/json")
+            .header("x-api-key", &cle)
+            .body(Body::from(json!({"messages": []}).to_string()))
+            .unwrap();
+        let r = app.clone().oneshot(hors_liste).await.unwrap();
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+
+        let binaire = Request::builder()
+            .method("POST")
+            .uri("/proxy/127.0.0.1:1/v1/x")
+            .header("content-type", "application/octet-stream")
+            .header("x-api-key", &cle)
+            .body(Body::from(vec![1u8, 2, 3]))
+            .unwrap();
+        let r = app.clone().oneshot(binaire).await.unwrap();
+        assert_eq!(r.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        let corps: Value =
+            serde_json::from_slice(&to_bytes(r.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert!(corps["message"].as_str().unwrap().contains("refusée"));
+
+        // Sans clé de passerelle : le message doit expliquer le partage des
+        // deux en-têtes, sinon on croit que sa clé OpenAI est refusée.
+        let sans_cle = Request::builder()
+            .method("POST")
+            .uri("/proxy/127.0.0.1:1/v1/x")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer sk-du-client")
+            .body(Body::from(json!({"messages": []}).to_string()))
+            .unwrap();
+        let r = app.clone().oneshot(sans_cle).await.unwrap();
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        let corps: Value =
+            serde_json::from_slice(&to_bytes(r.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert!(corps["message"].as_str().unwrap().contains("X-Api-Key"));
     }
 
     #[tokio::test]
@@ -371,29 +620,77 @@ mod tests {
         assert_eq!(s, StatusCode::UNAUTHORIZED);
 
         // L'admin crée deux comptes.
-        let (s, a) = call(&app, "POST", "/admin/accounts", Some(("x-admin-key", "admin")), json!({"name": "A"})).await;
+        let (s, a) = call(
+            &app,
+            "POST",
+            "/admin/accounts",
+            Some(("x-admin-key", "admin")),
+            json!({"name": "A"}),
+        )
+        .await;
         assert_eq!(s, StatusCode::CREATED);
         let key_a = format!("Bearer {}", a["api_key"].as_str().unwrap());
-        let (_, b) = call(&app, "POST", "/admin/accounts", Some(("x-admin-key", "admin")), json!({"name": "B"})).await;
+        let (_, b) = call(
+            &app,
+            "POST",
+            "/admin/accounts",
+            Some(("x-admin-key", "admin")),
+            json!({"name": "B"}),
+        )
+        .await;
         let key_b = b["api_key"].as_str().unwrap().to_string();
 
         // A pseudonymise dans un sous-tenant de son compte.
-        let (s, p) = call(&app, "POST", "/v1/pseudonymize", Some(("authorization", &key_a)),
-            json!({"text": "Écrire à marie@exemple.fr", "tenant_id": "doc1"})).await;
+        let (s, p) = call(
+            &app,
+            "POST",
+            "/v1/pseudonymize",
+            Some(("authorization", &key_a)),
+            json!({"text": "Écrire à marie@exemple.fr", "tenant_id": "doc1"}),
+        )
+        .await;
         assert_eq!(s, StatusCode::OK);
         assert_eq!(p["text"], "Écrire à [EMAIL_1]");
 
         // A restitue ; B et la clé interne (sans le bon tenant) ne peuvent pas.
         let q = json!({"text": "[EMAIL_1]", "tenant_id": "doc1"});
-        let (_, r) = call(&app, "POST", "/v1/depseudonymize", Some(("authorization", &key_a)), q.clone()).await;
+        let (_, r) = call(
+            &app,
+            "POST",
+            "/v1/depseudonymize",
+            Some(("authorization", &key_a)),
+            q.clone(),
+        )
+        .await;
         assert_eq!(r["text"], "marie@exemple.fr");
-        let (_, r) = call(&app, "POST", "/v1/depseudonymize", Some(("x-api-key", &key_b)), q.clone()).await;
+        let (_, r) = call(
+            &app,
+            "POST",
+            "/v1/depseudonymize",
+            Some(("x-api-key", &key_b)),
+            q.clone(),
+        )
+        .await;
         assert_eq!(r["text"], "[EMAIL_1]");
-        let (_, r) = call(&app, "POST", "/depseudonymize", Some(("x-api-key", "interne")), q).await;
+        let (_, r) = call(
+            &app,
+            "POST",
+            "/depseudonymize",
+            Some(("x-api-key", "interne")),
+            q,
+        )
+        .await;
         assert_eq!(r["text"], "[EMAIL_1]");
 
         // /v1/me renvoie le compte et la consommation.
-        let (s, me) = call(&app, "GET", "/v1/me", Some(("authorization", &key_a)), json!({})).await;
+        let (s, me) = call(
+            &app,
+            "GET",
+            "/v1/me",
+            Some(("authorization", &key_a)),
+            json!({}),
+        )
+        .await;
         assert_eq!(s, StatusCode::OK);
         assert_eq!(me["account"]["id"], a["account"]["id"]);
         assert_eq!(me["usage"]["requests"], 2);
@@ -401,13 +698,34 @@ mod tests {
 
         // Désactivation → 403.
         let id = a["account"]["id"].as_str().unwrap();
-        let (s, _) = call(&app, "PATCH", &format!("/admin/accounts/{id}"), Some(("x-admin-key", "admin")), json!({"disabled": true})).await;
+        let (s, _) = call(
+            &app,
+            "PATCH",
+            &format!("/admin/accounts/{id}"),
+            Some(("x-admin-key", "admin")),
+            json!({"disabled": true}),
+        )
+        .await;
         assert_eq!(s, StatusCode::OK);
-        let (s, _) = call(&app, "POST", "/v1/pseudonymize", Some(("authorization", &key_a)), json!({"text": "x"})).await;
+        let (s, _) = call(
+            &app,
+            "POST",
+            "/v1/pseudonymize",
+            Some(("authorization", &key_a)),
+            json!({"text": "x"}),
+        )
+        .await;
         assert_eq!(s, StatusCode::FORBIDDEN);
 
         // Mauvaise clé admin → 401 ; la clé interne n'ouvre pas /admin.
-        let (s, _) = call(&app, "GET", "/admin/accounts", Some(("x-admin-key", "interne")), json!({})).await;
+        let (s, _) = call(
+            &app,
+            "GET",
+            "/admin/accounts",
+            Some(("x-admin-key", "interne")),
+            json!({}),
+        )
+        .await;
         assert_eq!(s, StatusCode::UNAUTHORIZED);
     }
 
@@ -454,11 +772,32 @@ mod tests {
     #[tokio::test]
     async fn limite_par_minute_renvoie_429() {
         let app = app(state(1));
-        let (_, a) = call(&app, "POST", "/admin/accounts", Some(("x-admin-key", "admin")), json!({"name": "A"})).await;
+        let (_, a) = call(
+            &app,
+            "POST",
+            "/admin/accounts",
+            Some(("x-admin-key", "admin")),
+            json!({"name": "A"}),
+        )
+        .await;
         let key = a["api_key"].as_str().unwrap().to_string();
-        let (s, _) = call(&app, "POST", "/v1/depseudonymize", Some(("x-api-key", &key)), json!({"text": "x"})).await;
+        let (s, _) = call(
+            &app,
+            "POST",
+            "/v1/depseudonymize",
+            Some(("x-api-key", &key)),
+            json!({"text": "x"}),
+        )
+        .await;
         assert_eq!(s, StatusCode::OK);
-        let (s, e) = call(&app, "POST", "/v1/depseudonymize", Some(("x-api-key", &key)), json!({"text": "x"})).await;
+        let (s, e) = call(
+            &app,
+            "POST",
+            "/v1/depseudonymize",
+            Some(("x-api-key", &key)),
+            json!({"text": "x"}),
+        )
+        .await;
         assert_eq!(s, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(e["error"], "rate_limited");
     }
@@ -466,7 +805,12 @@ mod tests {
     async fn page_signup(app: &Router) -> String {
         let resp = app
             .clone()
-            .oneshot(Request::builder().uri("/signup").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/signup")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -545,23 +889,62 @@ mod tests {
         st.accounts = Some(comptes.clone());
         let amorcee = app(st);
 
-        let (s, _) = call(&amorcee, "GET", "/admin/accounts", Some(("x-admin-key", &premiere)), json!({})).await;
-        assert_eq!(s, StatusCode::OK, "la clé du premier démarrage ouvre la console");
+        let (s, _) = call(
+            &amorcee,
+            "GET",
+            "/admin/accounts",
+            Some(("x-admin-key", &premiere)),
+            json!({}),
+        )
+        .await;
+        assert_eq!(
+            s,
+            StatusCode::OK,
+            "la clé du premier démarrage ouvre la console"
+        );
 
         // Remplacement depuis la console : la nouvelle vaut, l'ancienne non.
-        let (s, r) = call(&amorcee, "POST", "/admin/key", Some(("x-admin-key", &premiere)), json!({})).await;
+        let (s, r) = call(
+            &amorcee,
+            "POST",
+            "/admin/key",
+            Some(("x-admin-key", &premiere)),
+            json!({}),
+        )
+        .await;
         assert_eq!(s, StatusCode::CREATED);
         let nouvelle = r["admin_key"].as_str().unwrap().to_string();
         assert_ne!(nouvelle, premiere);
 
-        let (s, _) = call(&amorcee, "GET", "/admin/accounts", Some(("x-admin-key", &nouvelle)), json!({})).await;
+        let (s, _) = call(
+            &amorcee,
+            "GET",
+            "/admin/accounts",
+            Some(("x-admin-key", &nouvelle)),
+            json!({}),
+        )
+        .await;
         assert_eq!(s, StatusCode::OK);
-        let (s, _) = call(&amorcee, "GET", "/admin/accounts", Some(("x-admin-key", &premiere)), json!({})).await;
+        let (s, _) = call(
+            &amorcee,
+            "GET",
+            "/admin/accounts",
+            Some(("x-admin-key", &premiere)),
+            json!({}),
+        )
+        .await;
         assert_eq!(s, StatusCode::UNAUTHORIZED, "l'ancienne ne vaut plus");
 
         // Quand la clé vient de la configuration, c'est elle qui fait foi.
         let configuree = app(state(0));
-        let (s, e) = call(&configuree, "POST", "/admin/key", Some(("x-admin-key", "admin")), json!({})).await;
+        let (s, e) = call(
+            &configuree,
+            "POST",
+            "/admin/key",
+            Some(("x-admin-key", "admin")),
+            json!({}),
+        )
+        .await;
         assert_eq!(s, StatusCode::BAD_REQUEST);
         assert!(e["message"].as_str().unwrap().contains("ADMIN_API_KEY"));
     }
@@ -588,12 +971,16 @@ mod tests {
         assert_eq!(s, StatusCode::CREATED);
         let code = inv["code"].as_str().unwrap().to_string();
         assert!(
-            inv["link"].as_str().unwrap().ends_with(&format!("/signup?invite={code}")),
+            inv["link"]
+                .as_str()
+                .unwrap()
+                .ends_with(&format!("/signup?invite={code}")),
             "un lien prêt à envoyer : {}",
             inv["link"]
         );
 
-        let inscription = |code: String| json!({"name": "Durand", "email": "d@x.fr", "invite_code": code});
+        let inscription =
+            |code: String| json!({"name": "Durand", "email": "d@x.fr", "invite_code": code});
         let (s, _) = call(&app, "POST", "/v1/signup", None, inscription(code.clone())).await;
         assert_eq!(s, StatusCode::CREATED, "première utilisation acceptée");
         let (s, _) = call(&app, "POST", "/v1/signup", None, inscription(code.clone())).await;
@@ -614,7 +1001,14 @@ mod tests {
         )
         .await;
         let code2 = inv2["code"].as_str().unwrap().to_string();
-        let (s, _) = call(&app, "DELETE", &format!("/admin/invitations/{code2}"), adm, json!({})).await;
+        let (s, _) = call(
+            &app,
+            "DELETE",
+            &format!("/admin/invitations/{code2}"),
+            adm,
+            json!({}),
+        )
+        .await;
         assert_eq!(s, StatusCode::NO_CONTENT);
         let (s, _) = call(&app, "POST", "/v1/signup", None, inscription(code2)).await;
         assert_eq!(s, StatusCode::FORBIDDEN, "invitation révoquée");
@@ -630,7 +1024,11 @@ mod tests {
         .await;
         let code3 = inv3["code"].as_str().unwrap().to_string();
         let (s, _) = call(&app, "POST", "/v1/signup", None, inscription(code3)).await;
-        assert_eq!(s, StatusCode::CREATED, "0 jour = sans expiration, pas expirée");
+        assert_eq!(
+            s,
+            StatusCode::CREATED,
+            "0 jour = sans expiration, pas expirée"
+        );
     }
 
     /// Avec un code d'invitation, un nouvel utilisateur obtient sa clé sans
@@ -659,14 +1057,24 @@ mod tests {
         let (s, _) = call(&app, "POST", "/v1/signup", None, demande(Some("au hasard"))).await;
         assert_eq!(s, StatusCode::FORBIDDEN, "mauvais code : refusé");
 
-        let (s, r) = call(&app, "POST", "/v1/signup", None, demande(Some("laissez-moi-entrer"))).await;
+        let (s, r) = call(
+            &app,
+            "POST",
+            "/v1/signup",
+            None,
+            demande(Some("laissez-moi-entrer")),
+        )
+        .await;
         assert_eq!(s, StatusCode::CREATED);
         assert!(r["api_key"].as_str().unwrap().starts_with("pgw_"));
 
         // La page sait d'avance qu'un code est exigé : la lui faire deviner par
         // une requête d'essai consommerait une inscription du quota de l'IP.
         let page = page_signup(&app).await;
-        assert!(page.contains(r#"data-exige="oui""#), "le champ code doit s'afficher");
+        assert!(
+            page.contains(r#"data-exige="oui""#),
+            "le champ code doit s'afficher"
+        );
         assert!(!page.contains("__CODE_EXIGE__"), "gabarit non substitué");
         let mut etat_ferme = state(0);
         etat_ferme.signup_per_hour = None;
@@ -731,7 +1139,10 @@ mod tests {
             .iter()
             .map(|s| s["url"].as_str().unwrap())
             .collect();
-        assert_eq!(serveurs[0], "https://autre-domaine.exemple", "le domaine visité d'abord");
+        assert_eq!(
+            serveurs[0], "https://autre-domaine.exemple",
+            "le domaine visité d'abord"
+        );
         assert!(
             serveurs.contains(&"https://adresse-publique.exemple"),
             "l'URL publique reste proposée : {serveurs:?}"

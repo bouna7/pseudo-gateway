@@ -53,6 +53,13 @@ pub enum AppError {
     /// Corps plus gros que `MAX_BODY_BYTES`.
     #[error("corps de requête trop volumineux")]
     PayloadTooLarge,
+    /// Corps que le filtre du proxy ne sait pas inspecter : le relayer tel quel
+    /// enverrait des données non masquées à l'API cible.
+    #[error("{0}")]
+    UnsupportedContent(String),
+    /// L'API cible du proxy n'a pas répondu, ou a répondu l'inattendu.
+    #[error("api cible injoignable : {0}")]
+    Upstream(String),
     /// Route inconnue.
     #[error("endpoint inconnu : {0}")]
     UnknownRoute(String),
@@ -78,14 +85,21 @@ impl IntoResponse for AppError {
                 (StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type")
             }
             AppError::PayloadTooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large"),
+            AppError::UnsupportedContent(_) => {
+                (StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type")
+            }
+            AppError::Upstream(_) => (StatusCode::BAD_GATEWAY, "upstream_error"),
             AppError::UnknownRoute(_) => (StatusCode::NOT_FOUND, "not_found"),
             AppError::MethodNotAllowed(_) => (StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed"),
             AppError::Vault(_) => (StatusCode::INTERNAL_SERVER_ERROR, "vault_error"),
         };
         // On logge le message technique, jamais une valeur en clair.
         tracing::warn!(status = %status.as_u16(), error = %self, "requête échouée");
-        let mut resp =
-            (status, Json(json!({ "error": code, "message": self.to_string() }))).into_response();
+        let mut resp = (
+            status,
+            Json(json!({ "error": code, "message": self.to_string() })),
+        )
+            .into_response();
         if let AppError::RateLimited { retry_after } = &self {
             if let Ok(v) = HeaderValue::from_str(&retry_after.to_string()) {
                 resp.headers_mut().insert(header::RETRY_AFTER, v);

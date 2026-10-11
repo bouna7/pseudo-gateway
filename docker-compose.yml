@@ -86,6 +86,9 @@ services:
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
       MAX_BODY_BYTES: ${MAX_BODY_BYTES:-1048576}
       REQUEST_TIMEOUT_SECS: ${REQUEST_TIMEOUT_SECS:-30}
+      # Proxy de filtrage : hotes joignables (none = proxy eteint).
+      PROXY_ALLOWED_HOSTS: ${PROXY_ALLOWED_HOSTS:-}
+      PROXY_TIMEOUT_SECS: ${PROXY_TIMEOUT_SECS:-120}
       PRESIDIO_TIMEOUT_MS: ${PRESIDIO_TIMEOUT_MS:-4000}
       # Toute option ajoutée au service doit être reprise ici : ce qui n'est pas
       # dans cette liste n'atteint jamais le conteneur, même défini côté Dokploy.
