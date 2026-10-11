@@ -187,6 +187,33 @@ pub async fn revoke_invitation(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Serialize, ToSchema)]
+pub struct AdminKeyRotated {
+    /// Nouvelle clé d'administration, affichée **une seule fois**.
+    pub admin_key: String,
+}
+
+/// Remplace la clé d'administration, sans toucher aux comptes ni aux jetons.
+///
+/// Sans effet si l'instance impose `ADMIN_API_KEY` par configuration : c'est
+/// alors elle qui fait foi, et elle se change chez l'hébergeur.
+#[utoipa::path(post, path = "/admin/key", tag = "admin", security(("admin_key" = [])),
+    responses((status = 201, body = AdminKeyRotated), (status = 401, body = ErrorBody)))]
+pub async fn rotate_admin_key(
+    State(st): State<AppState>,
+) -> Result<(StatusCode, Json<AdminKeyRotated>), AppError> {
+    if st.admin_key.is_some() {
+        return Err(AppError::BadRequest(
+            "cette instance utilise la clé définie dans ADMIN_API_KEY : changez-la \
+             chez votre hébergeur, puis redéployez"
+                .into(),
+        ));
+    }
+    let admin_key = accounts(&st)?.rotate_admin_key().await?;
+    tracing::info!("clé d'administration remplacée depuis la console");
+    Ok((StatusCode::CREATED, Json(AdminKeyRotated { admin_key })))
+}
+
 /// Révoque une clé (effet immédiat).
 #[utoipa::path(delete, path = "/admin/accounts/{id}/keys/{key_id}", tag = "admin", security(("admin_key" = [])),
     params(("id" = String, Path, description = "Identifiant du compte"),

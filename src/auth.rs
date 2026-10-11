@@ -136,9 +136,24 @@ pub async fn require_admin(
     req: Request,
     next: Next,
 ) -> Result<Response, AppError> {
-    let expected = st.admin_key.as_ref().ok_or(AppError::Disabled)?;
-    match presented_key(req.headers(), "x-admin-key") {
-        Some(k) if ct_eq(k, expected) => Ok(next.run(req).await),
+    if !st.admin_enabled() {
+        return Err(AppError::Disabled);
+    }
+    let presentee = presented_key(req.headers(), "x-admin-key");
+    // Deux clés possibles : celle de la configuration, et celle créée au premier
+    // démarrage (puis modifiable depuis la console), dont seule l'empreinte est
+    // conservée.
+    if let Some(k) = presentee {
+        let config = st.admin_key.as_ref().is_some_and(|attendue| ct_eq(k, attendue));
+        let stockee = match &st.accounts {
+            Some(accounts) => accounts.admin_key_matches(k).await?,
+            None => false,
+        };
+        if config || stockee {
+            return Ok(next.run(req).await);
+        }
+    }
+    match presentee {
         // Piège courant : la clé est bien là, mais dans l'en-tête des endpoints /v1.
         None if req.headers().contains_key("x-api-key") => Err(AppError::Unauthorized(
             "ces routes attendent l'en-tête « X-Admin-Key » ; l'en-tête « X-Api-Key » \
@@ -154,13 +169,10 @@ pub async fn require_admin(
              pas une clé de compte « pgw_ »"
                 .into(),
         )),
-        // Une valeur fraîchement générée n'ouvre rien tant qu'elle n'est pas
-        // posée dans la configuration du service : le dire ici évite de chercher
-        // ailleurs.
         Some(_) => Err(AppError::Unauthorized(
-            "clé d'administration invalide (en-tête « X-Admin-Key »). Une clé \
-             que vous venez de générer ne vaut qu'après l'avoir placée dans \
-             ADMIN_API_KEY et redéployé le service."
+            "clé d'administration invalide (en-tête « X-Admin-Key »). Celle du \
+             premier démarrage est affichée dans les journaux du service ; une \
+             clé générée ailleurs ne vaut qu'une fois posée dans ADMIN_API_KEY."
                 .into(),
         )),
     }

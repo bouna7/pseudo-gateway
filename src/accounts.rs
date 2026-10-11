@@ -18,6 +18,7 @@ use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, Script};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -25,6 +26,9 @@ use utoipa::ToSchema;
 
 /// Préfixe des clés d'API émises (repérable dans un scanner de secrets).
 pub const KEY_PREFIX: &str = "pgw_";
+
+/// Emplacement de l'empreinte de la clé d'administration dans le store.
+const META_ADMIN_KEY: &str = "admin_key_hash";
 
 // ─── Modèle ─────────────────────────────────────────────────────────────────
 
@@ -435,6 +439,42 @@ impl Accounts {
         })
     }
 
+    // ── Clé d'administration ─────────────────────────────────────────────
+
+    /// Clé créée au premier démarrage quand aucune n'est configurée : le service
+    /// s'administre alors sans éditer de variable ni redéployer. Renvoie la clé
+    /// en clair **la première fois seulement** — ensuite seule son empreinte est
+    /// conservée, comme pour les clés de compte.
+    pub async fn bootstrap_admin_key(&self) -> Result<Option<String>, AppError> {
+        if self.store.get_meta(META_ADMIN_KEY).await?.is_some() {
+            return Ok(None);
+        }
+        let cle = format!("pga_{}", random_hex(24));
+        self.store
+            .put_meta(META_ADMIN_KEY, &hash_key(&cle))
+            .await?;
+        Ok(Some(cle))
+    }
+
+    /// Remplace la clé d'administration (depuis la console). Sans effet sur les
+    /// comptes, les clés d'API et les jetons.
+    pub async fn rotate_admin_key(&self) -> Result<String, AppError> {
+        let cle = format!("pga_{}", random_hex(24));
+        self.store
+            .put_meta(META_ADMIN_KEY, &hash_key(&cle))
+            .await?;
+        Ok(cle)
+    }
+
+    /// Compare à l'empreinte conservée, en temps constant.
+    pub async fn admin_key_matches(&self, presentee: &str) -> Result<bool, AppError> {
+        let Some(attendue) = self.store.get_meta(META_ADMIN_KEY).await? else {
+            return Ok(false);
+        };
+        let fournie = hash_key(presentee);
+        Ok(fournie.as_bytes().ct_eq(attendue.as_bytes()).into())
+    }
+
     // ── Invitations ──────────────────────────────────────────────────────
 
     /// Crée une invitation ; le code est tiré au sort, assez long pour ne pas
@@ -531,6 +571,10 @@ pub trait AccountStore: Send + Sync {
     /// Crée ou remplace le compte.
     async fn put(&self, account: &Account) -> Result<(), VaultError>;
     async fn list(&self) -> Result<Vec<Account>, VaultError>;
+    /// Réglages du service qui survivent aux redémarrages (empreinte de la clé
+    /// d'administration créée au premier démarrage, par exemple).
+    async fn get_meta(&self, cle: &str) -> Result<Option<String>, VaultError>;
+    async fn put_meta(&self, cle: &str, valeur: &str) -> Result<(), VaultError>;
     /// Invitations : mêmes opérations, dans leur propre espace de clés.
     async fn put_invitation(&self, invitation: &Invitation) -> Result<(), VaultError>;
     async fn get_invitation(&self, code: &str) -> Result<Option<Invitation>, VaultError>;
@@ -557,6 +601,7 @@ struct MemInner {
     accounts: HashMap<String, Account>,
     keys: HashMap<String, String>,
     invitations: HashMap<String, Invitation>,
+    meta: HashMap<String, String>,
     counters: HashMap<String, (u64, Instant)>,
 }
 
@@ -585,6 +630,15 @@ impl AccountStore for InMemoryAccountStore {
 
     async fn list(&self) -> Result<Vec<Account>, VaultError> {
         Ok(self.lock()?.accounts.values().cloned().collect())
+    }
+
+    async fn get_meta(&self, cle: &str) -> Result<Option<String>, VaultError> {
+        Ok(self.lock()?.meta.get(cle).cloned())
+    }
+
+    async fn put_meta(&self, cle: &str, valeur: &str) -> Result<(), VaultError> {
+        self.lock()?.meta.insert(cle.to_owned(), valeur.to_owned());
+        Ok(())
     }
 
     async fn put_invitation(&self, invitation: &Invitation) -> Result<(), VaultError> {
@@ -719,6 +773,18 @@ impl AccountStore for RedisAccountStore {
             }
         }
         Ok(out)
+    }
+
+    async fn get_meta(&self, cle: &str) -> Result<Option<String>, VaultError> {
+        let mut c = self.conn.clone();
+        c.get(format!("pga:meta:{cle}")).await.map_err(store_err)
+    }
+
+    async fn put_meta(&self, cle: &str, valeur: &str) -> Result<(), VaultError> {
+        let mut c = self.conn.clone();
+        c.set::<_, _, ()>(format!("pga:meta:{cle}"), valeur)
+            .await
+            .map_err(store_err)
     }
 
     async fn put_invitation(&self, invitation: &Invitation) -> Result<(), VaultError> {
