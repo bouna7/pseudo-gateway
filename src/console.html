@@ -68,6 +68,21 @@
         <span class="sous" style="margin:0">Gardée seulement dans cet onglet, jamais enregistrée.</span>
       </div>
     </fieldset>
+
+    <details>
+      <summary class="sous" style="cursor:pointer">Vous n'avez pas encore de clé d'administration ?</summary>
+      <fieldset style="margin-top:12px">
+        <legend>Générer une clé</legend>
+        <p class="sous" style="margin:0 0 10px">
+          Cette valeur est tirée au sort dans votre navigateur et n'est envoyée nulle part.
+          Elle ne devient la clé du service qu'une fois posée dans sa configuration.
+        </p>
+        <div class="actions" style="margin-top:0">
+          <button id="btn-generer">Générer une valeur</button>
+        </div>
+        <div id="cle-generee"></div>
+      </fieldset>
+    </details>
   </section>
 
   <!-- ── Espace de travail ─────────────────────────────────────────────── -->
@@ -338,6 +353,43 @@
       bouton.disabled = false;
     }
   }
+
+  // Obtenir une clé sans terminal ni binaire installé : le navigateur sait
+  // tirer de l'aléa cryptographique, autant s'en servir.
+  $("btn-generer").onclick = () => {
+    const octets = new Uint8Array(24);
+    crypto.getRandomValues(octets);
+    const valeur = Array.from(octets, (o) => o.toString(16).padStart(2, "0")).join("");
+
+    const boite = el("div", undefined, "cle");
+    boite.appendChild(el("p", "Collez cette valeur dans la variable ADMIN_API_KEY de votre hébergeur, redéployez, puis connectez-vous avec."));
+    const ligne = el("div", undefined, "valeur");
+    const champ = document.createElement("input");
+    champ.readOnly = true;
+    champ.value = valeur;
+    const copier = el("button", "Copier", "principal");
+    copier.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(valeur);
+        copier.textContent = "Copié";
+      } catch {
+        champ.select();
+        copier.textContent = "Ctrl+C";
+      }
+      setTimeout(() => (copier.textContent = "Copier"), 2000);
+    };
+    ligne.append(champ, copier);
+    boite.appendChild(ligne);
+    boite.appendChild(el(
+      "p",
+      "Changer cette clé est sans risque : comptes, clés et jetons restent intacts. " +
+        "Ne touchez en revanche jamais à PSEUDO_KEY_1 ni PSEUDO_INDEX_KEY, sous peine de rendre les jetons illisibles.",
+      "sous",
+    ));
+    const cible = $("cle-generee");
+    cible.textContent = "";
+    cible.appendChild(boite);
+  };
 
   $("btn-connexion").onclick = (ev) => agir(ev.target, async () => {
     cleAdmin = $("admin").value.trim();
