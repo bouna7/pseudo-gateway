@@ -349,6 +349,8 @@ ainsi que noms, villes et organisations. Un terme que la détection ignore peut
         health, pseudonymize, depseudonymize, me, signup,
         crate::admin::create_account, crate::admin::list_accounts, crate::admin::get_account,
         crate::admin::update_account, crate::admin::issue_key, crate::admin::revoke_key,
+        crate::admin::create_invitation, crate::admin::list_invitations,
+        crate::admin::revoke_invitation,
     ),
     components(schemas(crate::accounts::AccountPatch)),
     modifiers(&SecuritySchemes)
