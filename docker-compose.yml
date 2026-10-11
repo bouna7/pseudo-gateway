@@ -67,6 +67,9 @@ services:
       GATEWAY_API_KEY: ${GATEWAY_API_KEY:-}
       # API publique (comptes + clés par utilisateur) : activée si ADMIN_API_KEY est définie.
       ADMIN_API_KEY: ${ADMIN_API_KEY:-}
+      # Sans ADMIN_API_KEY, une cle est creee au premier demarrage et affichee
+      # dans les journaux : la console est utilisable sans rien configurer.
+      ADMIN_BOOTSTRAP: ${ADMIN_BOOTSTRAP:-true}
       PUBLIC_SIGNUP: ${PUBLIC_SIGNUP:-false}
       SIGNUP_PER_IP_PER_HOUR: ${SIGNUP_PER_IP_PER_HOUR:-5}
       # Code exige a l'inscription publique : sans lui, n'importe qui cree un compte.

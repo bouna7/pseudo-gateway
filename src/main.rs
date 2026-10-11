@@ -66,10 +66,13 @@ fn env_flag(name: &str) -> bool {
 /// Renvoie `Ok(true)` quand l'instance démarre délibérément sans protection.
 fn auth_guard(
     has_gateway_key: bool,
-    has_admin_key: bool,
+    admin_disponible: bool,
     allow_insecure: bool,
 ) -> Result<bool, &'static str> {
-    if has_gateway_key || has_admin_key {
+    // `admin_disponible` couvre les deux cas : clé de configuration, ou clé créée
+    // au premier démarrage. Ne regarder que l'environnement refusait le démarrage
+    // d'une instance pourtant protégée par sa clé d'amorçage.
+    if has_gateway_key || admin_disponible {
         return Ok(false);
     }
     if allow_insecure {
@@ -163,6 +166,7 @@ const OPTIONS: &[&str] = &[
     "SIGNUP_PER_IP_PER_HOUR",
     "SIGNUP_INVITE_CODE",
     "SIGNUP_REQUIRE_INVITE",
+    "ADMIN_BOOTSTRAP",
     "DEFAULT_PLAN",
     "DEFAULT_RATE_PER_MIN",
     "DEFAULT_MONTHLY_QUOTA",
@@ -296,7 +300,15 @@ async fn main() {
     let api_key = env_opt("GATEWAY_API_KEY").map(Arc::new);
     // Clé d'administration : active l'API publique (comptes + clés par utilisateur).
     let admin_key = env_opt("ADMIN_API_KEY").map(Arc::new);
-    let accounts = admin_key.as_ref().map(|_| {
+    // Administration disponible dès que l'une des deux conditions tient : une clé
+    // configurée, ou l'amorçage automatique (défaut). Sans cela, installer le
+    // service imposait d'éditer une variable puis de redéployer avant même de
+    // pouvoir ouvrir la console.
+    let amorcage = !matches!(
+        env_opt("ADMIN_BOOTSTRAP").as_deref(),
+        Some("false" | "0" | "no" | "off")
+    );
+    let accounts = if admin_key.is_some() || amorcage {
         let defaults = PlanDefaults::from_env();
         tracing::info!(
             plan = %defaults.plan,
@@ -304,8 +316,34 @@ async fn main() {
             monthly_quota = defaults.monthly_quota,
             "API publique activée (comptes + /admin)"
         );
-        Arc::new(Accounts::new(account_store, defaults))
-    });
+        Some(Arc::new(Accounts::new(account_store, defaults)))
+    } else {
+        None
+    };
+
+    if admin_key.is_none() {
+        if let Some(accounts) = &accounts {
+            match accounts.bootstrap_admin_key().await {
+                // Affichée une seule fois : ensuite seule son empreinte est
+                // conservée, et la console permet de la remplacer.
+                Ok(Some(cle)) => tracing::warn!(
+                    "\n\
+                     ┌──────────────────────────────────────────────────────────────┐\n\
+                     │  CLÉ D'ADMINISTRATION (premier démarrage)                    │\n\
+                     │                                                              │\n\
+                     │  {cle}  │\n\
+                     │                                                              │\n\
+                     │  Elle ouvre la console /admin/ui. Notez-la : elle ne sera    │\n\
+                     │  plus affichée. Vous pourrez la remplacer depuis la console. │\n\
+                     └──────────────────────────────────────────────────────────────┘"
+                ),
+                Ok(None) => tracing::info!(
+                    "clé d'administration existante (créée à un précédent démarrage)"
+                ),
+                Err(e) => fail("création de la clé d'administration impossible", e),
+            }
+        }
+    }
 
     let signup_per_hour = match (env_flag("PUBLIC_SIGNUP"), accounts.is_some()) {
         (true, true) => {
@@ -323,7 +361,7 @@ async fn main() {
     if api_key.is_some() {
         tracing::info!("clé d'API interne activée (X-Api-Key / Bearer)");
     }
-    match auth_guard(api_key.is_some(), admin_key.is_some(), env_flag("ALLOW_INSECURE")) {
+    match auth_guard(api_key.is_some(), accounts.is_some(), env_flag("ALLOW_INSECURE")) {
         Ok(true) => tracing::warn!(
             "ALLOW_INSECURE=true — endpoints NON protégés : /depseudonymize rend \
              des données réelles à quiconque atteint ce port"

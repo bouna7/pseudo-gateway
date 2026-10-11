@@ -112,6 +112,21 @@
 
     <div id="nouvelle-cle"></div>
 
+    <details id="bloc-rotation">
+      <summary class="sous" style="cursor:pointer">Remplacer la clé d'administration</summary>
+      <fieldset style="margin-top:12px">
+        <legend>Nouvelle clé</legend>
+        <p class="sous" style="margin:0 0 10px">
+          Sans effet sur les comptes, les clés d'API et les jetons. L'ancienne cesse
+          de fonctionner immédiatement : notez la nouvelle avant de fermer.
+        </p>
+        <div class="actions" style="margin-top:0">
+          <button id="btn-rotation">Remplacer maintenant</button>
+        </div>
+        <div id="nouvelle-admin"></div>
+      </fieldset>
+    </details>
+
     <h2>Invitations</h2>
     <p class="sous">Un lien à envoyer : l'invité obtient sa clé lui-même, sans rien saisir
        et sans votre clé d'administration.</p>
@@ -417,6 +432,37 @@
     sessionStorage.setItem("pgw_admin", cleAdmin);
     $("connexion").hidden = true;
     $("travail").hidden = false;
+  });
+
+  $("btn-rotation").onclick = (ev) => agir(ev.target, async () => {
+    const r = await api("POST", "/admin/key");
+    // La session continue avec la nouvelle clé : sans cela, l'écran suivant
+    // se refermerait sur un 401 juste après le remplacement.
+    cleAdmin = r.admin_key;
+    sessionStorage.setItem("pgw_admin", cleAdmin);
+
+    const boite = el("div", undefined, "cle");
+    boite.appendChild(el("p", "Nouvelle clé d'administration. L'ancienne ne fonctionne plus : notez celle-ci."));
+    const ligne = el("div", undefined, "valeur");
+    const champ = document.createElement("input");
+    champ.readOnly = true;
+    champ.value = r.admin_key;
+    const copier = el("button", "Copier", "principal");
+    copier.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(r.admin_key);
+        copier.textContent = "Copié";
+      } catch {
+        champ.select();
+        copier.textContent = "Ctrl+C";
+      }
+      setTimeout(() => (copier.textContent = "Copier"), 2000);
+    };
+    ligne.append(champ, copier);
+    boite.appendChild(ligne);
+    const cible = $("nouvelle-admin");
+    cible.textContent = "";
+    cible.appendChild(boite);
   });
 
   $("btn-invitation").onclick = (ev) => agir(ev.target, async () => {

@@ -43,6 +43,12 @@ impl AppState {
     pub fn open_mode(&self) -> bool {
         self.api_key.is_none() && self.accounts.is_none()
     }
+
+    /// L'administration existe dès qu'il y a des comptes : la clé vient soit de
+    /// la configuration, soit du premier démarrage.
+    pub fn admin_enabled(&self) -> bool {
+        self.accounts.is_some()
+    }
 }
 
 /// Réglages de la couche HTTP.
@@ -174,7 +180,7 @@ pub fn router(state: AppState, cfg: &HttpConfig) -> Router {
         );
     }
 
-    if state.admin_key.is_some() {
+    if state.admin_enabled() {
         let admin_routes = Router::new()
             .route(
                 "/admin/accounts",
@@ -189,6 +195,7 @@ pub fn router(state: AppState, cfg: &HttpConfig) -> Router {
                 post(admin::create_invitation).get(admin::list_invitations),
             )
             .route("/admin/invitations/:code", delete(admin::revoke_invitation))
+            .route("/admin/key", post(admin::rotate_admin_key))
             .route("/admin/accounts/:id/keys", post(admin::issue_key))
             .route("/admin/accounts/:id/keys/:key_id", delete(admin::revoke_key))
             .route_layer(from_fn_with_state(state.clone(), auth::require_admin));
@@ -218,7 +225,7 @@ pub fn router(state: AppState, cfg: &HttpConfig) -> Router {
         }
         // Idem pour /admin/* : ces routes n'existent que si ADMIN_API_KEY est
         // définie, et elles ne concernent que l'exploitant de l'instance.
-        if state.admin_key.is_none() {
+        if !state.admin_enabled() {
             spec.paths.paths.retain(|path, _| !path.starts_with("/admin/"));
         }
         let spec = Arc::new(spec);
@@ -514,6 +521,51 @@ mod tests {
         assert_eq!(s, StatusCode::CREATED);
     }
 
+    /// Installer le service doit suffire à l'administrer : une clé est créée au
+    /// premier démarrage, elle ouvre la console, et elle se remplace de là —
+    /// sans éditer de variable ni redéployer.
+    #[tokio::test]
+    async fn cle_d_administration_creee_au_premier_demarrage() {
+        let comptes = Arc::new(Accounts::new(
+            Arc::new(InMemoryAccountStore::new()),
+            PlanDefaults {
+                plan: "free".into(),
+                rate_per_min: 0,
+                monthly_quota: 0,
+            },
+        ));
+        let premiere = comptes.bootstrap_admin_key().await.unwrap().expect("créée");
+        assert!(
+            comptes.bootstrap_admin_key().await.unwrap().is_none(),
+            "un redémarrage ne la régénère pas"
+        );
+
+        let mut st = state(0);
+        st.admin_key = None; // aucune clé dans la configuration
+        st.accounts = Some(comptes.clone());
+        let amorcee = app(st);
+
+        let (s, _) = call(&amorcee, "GET", "/admin/accounts", Some(("x-admin-key", &premiere)), json!({})).await;
+        assert_eq!(s, StatusCode::OK, "la clé du premier démarrage ouvre la console");
+
+        // Remplacement depuis la console : la nouvelle vaut, l'ancienne non.
+        let (s, r) = call(&amorcee, "POST", "/admin/key", Some(("x-admin-key", &premiere)), json!({})).await;
+        assert_eq!(s, StatusCode::CREATED);
+        let nouvelle = r["admin_key"].as_str().unwrap().to_string();
+        assert_ne!(nouvelle, premiere);
+
+        let (s, _) = call(&amorcee, "GET", "/admin/accounts", Some(("x-admin-key", &nouvelle)), json!({})).await;
+        assert_eq!(s, StatusCode::OK);
+        let (s, _) = call(&amorcee, "GET", "/admin/accounts", Some(("x-admin-key", &premiere)), json!({})).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED, "l'ancienne ne vaut plus");
+
+        // Quand la clé vient de la configuration, c'est elle qui fait foi.
+        let configuree = app(state(0));
+        let (s, e) = call(&configuree, "POST", "/admin/key", Some(("x-admin-key", "admin")), json!({})).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert!(e["message"].as_str().unwrap().contains("ADMIN_API_KEY"));
+    }
+
     /// Les invitations se créent depuis la console : un lien à envoyer, limité
     /// en utilisations, révocable — là où un code figé dans la configuration
     /// demandait un redéploiement et ne pouvait ni se limiter ni se retirer.
@@ -719,6 +771,7 @@ mod tests {
         let mut st = state(0);
         st.signup_per_hour = None;
         st.admin_key = None;
+        st.accounts = None;
         let depouille = router(
             st,
             &HttpConfig {
@@ -763,9 +816,10 @@ mod tests {
         // La page est publique : elle ne doit contenir aucun secret.
         assert!(!page.contains("admin-demo"), "aucune clé en dur");
 
-        // Sans ADMIN_API_KEY, l'administration n'existe pas : la console non plus.
+        // Administration désactivée (ADMIN_BOOTSTRAP=false) : la console non plus.
         let mut st = state(0);
         st.admin_key = None;
+        st.accounts = None;
         let sans_admin = router(
             st,
             &HttpConfig {
