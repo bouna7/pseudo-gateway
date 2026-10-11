@@ -187,9 +187,11 @@ PSEUDO_KEY_1=<64 caractères hex>
 PSEUDO_CURRENT_KEY_ID=1
 PSEUDO_INDEX_KEY=<64 caractères hex>
 
-# Authentification — au moins une, sinon le service refuse de démarrer
+# Authentification
 GATEWAY_API_KEY=<secret>        # vos propres services (clé MAÎTRESSE)
-ADMIN_API_KEY=<secret>          # API publique : comptes, clés, quotas
+# ADMIN_API_KEY est FACULTATIVE : laissée vide, une clé d'administration est
+# créée au premier démarrage et affichée dans les journaux du service. Vous
+# ouvrez alors /admin/ui avec, et vous pouvez la remplacer depuis la console.
 
 # API publique
 PUBLIC_SIGNUP=false
@@ -202,7 +204,7 @@ PUBLIC_BASE_URL=https://votre-domaine.exemple
 CORS_ALLOWED_ORIGINS=           # domaines des sites appelant depuis un navigateur
 
 # Version déployée (docker-compose.images.yml uniquement)
-PGW_VERSION=0.3.3
+PGW_VERSION=0.4.0
 ```
 
 4. **Mise à jour** : changer `PGW_VERSION` et redéployer (ou bumper l'`ARG
@@ -313,6 +315,21 @@ librement son `tenant_id`, comme avant. Ne la donnez jamais à un tiers.
 | `POST/GET /admin/accounts`, `GET/PATCH /admin/accounts/{id}` | `X-Admin-Key` | Créer, lister, modifier, désactiver |
 | `POST /admin/accounts/{id}/keys`, `DELETE …/keys/{key_id}` | `X-Admin-Key` | Rotation / révocation de clé |
 | `POST/GET /admin/invitations`, `DELETE /admin/invitations/{code}` | `X-Admin-Key` | Liens d'invitation : créer, suivre, révoquer |
+
+**Première ouverture de la console.** Si `ADMIN_API_KEY` n'est pas définie, le
+service crée une clé au premier démarrage et l'affiche dans ses journaux :
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  CLÉ D'ADMINISTRATION (premier démarrage)                    │
+│  pga_…                                                       │
+└──────────────────────────────────────────────────────────────┘
+```
+
+Copiez-la, ouvrez `/admin/ui` (`ENABLE_ADMIN_UI=true`), et remplacez-la quand
+vous voulez depuis la console — c'est sans effet sur les comptes et les jetons.
+Un redémarrage ne la régénère pas. `ADMIN_BOOTSTRAP=false` désactive
+l'administration pour une instance purement interne.
 
 **Comment vos clients obtiennent leur clé**, au choix :
 
