@@ -362,7 +362,26 @@
     const valeur = Array.from(octets, (o) => o.toString(16).padStart(2, "0")).join("");
 
     const boite = el("div", undefined, "cle");
-    boite.appendChild(el("p", "Collez cette valeur dans la variable ADMIN_API_KEY de votre hébergeur, redéployez, puis connectez-vous avec."));
+    // Dire franchement que cette valeur n'ouvre rien encore : la generer puis
+    // tenter de se connecter avec est le reflexe naturel, et il echoue.
+    const titre = el("p");
+    titre.innerHTML =
+      "<strong>Cette valeur n'est pas encore votre clé.</strong> Elle le deviendra " +
+      "en trois étapes :";
+    boite.appendChild(titre);
+    const etapes = document.createElement("ol");
+    etapes.style.margin = "0 0 12px";
+    etapes.style.paddingLeft = "20px";
+    [
+      "Copiez-la ci-dessous.",
+      "Collez-la dans la variable ADMIN_API_KEY chez votre hébergeur (Dokploy : onglet Environment).",
+      "Redéployez le service, puis revenez ici et saisissez cette même valeur.",
+    ].forEach((t) => {
+      const li = document.createElement("li");
+      li.textContent = t;
+      etapes.appendChild(li);
+    });
+    boite.appendChild(etapes);
     const ligne = el("div", undefined, "valeur");
     const champ = document.createElement("input");
     champ.readOnly = true;

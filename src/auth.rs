@@ -154,8 +154,14 @@ pub async fn require_admin(
              pas une clé de compte « pgw_ »"
                 .into(),
         )),
+        // Une valeur fraîchement générée n'ouvre rien tant qu'elle n'est pas
+        // posée dans la configuration du service : le dire ici évite de chercher
+        // ailleurs.
         Some(_) => Err(AppError::Unauthorized(
-            "clé d'administration invalide (en-tête « X-Admin-Key »)".into(),
+            "clé d'administration invalide (en-tête « X-Admin-Key »). Une clé \
+             que vous venez de générer ne vaut qu'après l'avoir placée dans \
+             ADMIN_API_KEY et redéployé le service."
+                .into(),
         )),
     }
 }
