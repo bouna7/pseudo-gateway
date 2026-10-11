@@ -160,11 +160,10 @@ pub fn router(state: AppState, cfg: &HttpConfig) -> Router {
         // requête d'essai consommait une inscription du quota de l'IP.
         let page: Arc<str> = Arc::from(include_str!("signup.html").replace(
             "__CODE_EXIGE__",
-            if state.signup_invite_code.is_some() {
-                "oui"
-            } else {
-                "non"
-            },
+            // Le même critère que la vérification à l'inscription : sinon la page
+            // cache le champ alors que le serveur réclame une invitation, et
+            // l'utilisateur se heurte à un refus sans pouvoir rien y faire.
+            if state.signup_require_invite { "oui" } else { "non" },
         ));
         app = app.route(
             "/signup",
@@ -457,6 +456,64 @@ mod tests {
         assert_eq!(e["error"], "rate_limited");
     }
 
+    async fn page_signup(app: &Router) -> String {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri("/signup").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let corps = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        String::from_utf8(corps.to_vec()).unwrap()
+    }
+
+    /// La page doit demander un code exactement quand le serveur en exige un.
+    /// Sans ce lien, retirer le code permanent faisait disparaître le champ alors
+    /// que l'inscription restait fermée : l'utilisateur se heurtait à un refus
+    /// sans aucun moyen d'y répondre — constaté en production.
+    #[tokio::test]
+    async fn la_page_demande_un_code_quand_le_serveur_en_exige_un() {
+        // Invitation exigée, aucun code permanent : le champ doit apparaître.
+        let mut st = state(0);
+        st.signup_require_invite = true;
+        st.signup_invite_code = None;
+        let app = app(st);
+        assert!(
+            page_signup(&app).await.contains(r#"data-exige="oui""#),
+            "le champ doit s'afficher même sans code permanent"
+        );
+        let (s, _) = call(
+            &app,
+            "POST",
+            "/v1/signup",
+            None,
+            json!({"name": "Essai", "email": "e@x.fr"}),
+        )
+        .await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "et le serveur refuse bien");
+
+        // Inscription ouverte : pas de champ, et pas de refus.
+        let mut etat_ouvert = state(0);
+        etat_ouvert.signup_require_invite = false;
+        let ouverte = router(
+            etat_ouvert,
+            &HttpConfig {
+                docs: true,
+                ..Default::default()
+            },
+        );
+        assert!(page_signup(&ouverte).await.contains(r#"data-exige="non""#));
+        let (s, _) = call(
+            &ouverte,
+            "POST",
+            "/v1/signup",
+            None,
+            json!({"name": "Essai", "email": "e@x.fr"}),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED);
+    }
+
     /// Les invitations se créent depuis la console : un lien à envoyer, limité
     /// en utilisations, révocable — là où un code figé dans la configuration
     /// demandait un redéploiement et ne pouvait ni se limiter ni se retirer.
@@ -556,14 +613,7 @@ mod tests {
 
         // La page sait d'avance qu'un code est exigé : la lui faire deviner par
         // une requête d'essai consommerait une inscription du quota de l'IP.
-        let resp = app
-            .clone()
-            .oneshot(Request::builder().uri("/signup").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let page = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-        let page = String::from_utf8(page.to_vec()).unwrap();
+        let page = page_signup(&app).await;
         assert!(page.contains(r#"data-exige="oui""#), "le champ code doit s'afficher");
         assert!(!page.contains("__CODE_EXIGE__"), "gabarit non substitué");
         let mut etat_ferme = state(0);
