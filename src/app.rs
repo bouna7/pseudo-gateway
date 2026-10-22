@@ -981,8 +981,26 @@ mod tests {
 
         let inscription =
             |code: String| json!({"name": "Durand", "email": "d@x.fr", "invite_code": code});
+
+        // Une faute de frappe dans l'adresse ne doit PAS brûler l'invitation :
+        // avec max_uses=1, l'arrivant serait bloqué par sa propre erreur et
+        // devrait redemander un lien (constaté en test local le 2026-10-22).
+        let (s, _) = call(
+            &app,
+            "POST",
+            "/v1/signup",
+            None,
+            json!({"name": "Durand", "email": "adresse-sans-arobase", "invite_code": code.clone()}),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "refus pour l'adresse, pas pour le code");
+
         let (s, _) = call(&app, "POST", "/v1/signup", None, inscription(code.clone())).await;
-        assert_eq!(s, StatusCode::CREATED, "première utilisation acceptée");
+        assert_eq!(
+            s,
+            StatusCode::CREATED,
+            "l'invitation est restée intacte malgré l'essai raté"
+        );
         let (s, _) = call(&app, "POST", "/v1/signup", None, inscription(code.clone())).await;
         assert_eq!(s, StatusCode::FORBIDDEN, "une seule utilisation autorisée");
 

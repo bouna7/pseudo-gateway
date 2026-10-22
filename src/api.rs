@@ -199,6 +199,12 @@ pub async fn signup(
     // Limite par IP d'abord : un code d'invitation ne doit pas pouvoir être
     // deviné en enchaînant les tentatives.
     accounts.throttle(&format!("su:{ip}"), limit, 3600).await?;
+    // Valider les champs AVANT de consommer l'invitation. Dans l'autre ordre,
+    // une faute de frappe dans l'adresse brûlait un usage du code : avec
+    // `max_uses: 1`, l'arrivant se retrouvait bloqué par sa propre erreur, et
+    // devait redemander une invitation à l'exploitant.
+    let name = crate::accounts::validate_name(&req.name)?;
+    let email = crate::accounts::validate_email(Some(req.email))?;
     if st.signup_require_invite {
         let fourni = req.invite_code.as_deref().unwrap_or("").trim();
         // Deux sources acceptées : le code permanent de la configuration, et les
@@ -219,8 +225,8 @@ pub async fn signup(
     }
     let (account, api_key) = accounts
         .create(NewAccount {
-            name: req.name,
-            email: Some(req.email),
+            name,
+            email,
             plan: None,
             rate_per_min: None,
             monthly_quota: None,

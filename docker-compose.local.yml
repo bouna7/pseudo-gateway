@@ -8,6 +8,13 @@ services:
   redis:
     ports:
       - "127.0.0.1:6379:6379"
+  presidio:
+    # Publié en local pour deux raisons : interroger la détection directement
+    # quand un nom n'est pas masqué, et faire tourner la passerelle hors
+    # conteneur (cargo run) tout en gardant le NER sous la main. 5002 est le
+    # port attendu par défaut dans .env.example.
+    ports:
+      - "127.0.0.1:5002:3000"
   gateway:
     ports:
       - "8080:8080"

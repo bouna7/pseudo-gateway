@@ -217,7 +217,7 @@ fn validate_sub_tenant(s: &str) -> Result<(), AppError> {
     }
 }
 
-fn validate_name(name: &str) -> Result<String, AppError> {
+pub(crate) fn validate_name(name: &str) -> Result<String, AppError> {
     let n = name.trim();
     if n.is_empty() || n.chars().count() > 100 {
         return Err(AppError::BadRequest("name : 1 à 100 caractères".into()));
@@ -225,7 +225,7 @@ fn validate_name(name: &str) -> Result<String, AppError> {
     Ok(n.to_string())
 }
 
-fn validate_email(email: Option<String>) -> Result<Option<String>, AppError> {
+pub(crate) fn validate_email(email: Option<String>) -> Result<Option<String>, AppError> {
     match email.map(|e| e.trim().to_string()).filter(|e| !e.is_empty()) {
         None => Ok(None),
         Some(e) => {
