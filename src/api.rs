@@ -357,6 +357,7 @@ jamais interprétée ici. Les réponses en flux (SSE) sont prises en charge.
     ),
     paths(
         health, pseudonymize, depseudonymize, me, signup,
+        crate::admin::reindex,
         crate::admin::create_account, crate::admin::list_accounts, crate::admin::get_account,
         crate::admin::update_account, crate::admin::issue_key, crate::admin::revoke_key,
         crate::admin::create_invitation, crate::admin::list_invitations,

@@ -29,6 +29,40 @@ fn accounts(st: &AppState) -> Result<&Arc<crate::accounts::Accounts>, AppError> 
     st.accounts.as_ref().ok_or(AppError::Disabled)
 }
 
+/// Comptes rendus d'une ré-indexation.
+#[derive(Serialize, ToSchema)]
+pub struct ReindexResp {
+    /// Jetons examinés pour ce tenant.
+    pub examines: usize,
+    /// Jetons auxquels une forme canonique vient d'être rattachée.
+    pub rattaches: usize,
+}
+
+/// Rattache la forme canonique de chaque valeur déjà stockée à son jeton.
+///
+/// À lancer UNE FOIS par tenant après la mise en service de la normalisation
+/// (30/10/2026). Les documents indexés avant celle-ci ont leurs jetons rangés
+/// sous l'index de la chaîne brute : une question écrivant le même nom
+/// autrement ne les retrouvait pas, et le modèle répondait que l'information
+/// n'était pas dans le contexte. Sans ce rattrapage il faudrait réimporter
+/// tous les documents.
+///
+/// Additif et rejouable : aucune valeur modifiée, aucun jeton créé.
+#[utoipa::path(post, path = "/admin/reindex/{tenant}", tag = "admin",
+    security(("admin_key" = [])),
+    responses((status = 200, body = ReindexResp), (status = 401, body = ErrorBody)))]
+pub async fn reindex(
+    State(st): State<AppState>,
+    Path(tenant): Path<String>,
+) -> Result<Json<ReindexResp>, AppError> {
+    let (examines, rattaches) = st.vault.reindex(&tenant).await?;
+    tracing::info!(%tenant, examines, rattaches, "ré-indexation des formes canoniques");
+    Ok(Json(ReindexResp {
+        examines,
+        rattaches,
+    }))
+}
+
 /// Crée un compte et sa première clé d'API.
 #[utoipa::path(post, path = "/admin/accounts", tag = "admin",
     request_body = CreateAccountReq, security(("admin_key" = [])),

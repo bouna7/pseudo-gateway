@@ -13,6 +13,7 @@
 //! transitent par le store.
 
 use crate::error::VaultError;
+use crate::normalize;
 use crate::keys::Keyring;
 use crate::store::VaultStore;
 use once_cell::sync::Lazy;
@@ -70,13 +71,67 @@ impl Vault {
     }
 
     /// Renvoie le jeton existant pour `value`, ou en crée un nouveau et chiffre la valeur.
+    /// Jeton d'une valeur, créé si elle est nouvelle.
+    ///
+    /// L'index porte sur la FORME CANONIQUE de la valeur ([`crate::normalize`])
+    /// et non sur la chaîne brute : sans cela, « MAMADOU SOUMARE » dans un
+    /// document et « Soumare Mamadou » dans une question reçoivent deux jetons
+    /// différents, et le modèle ne peut plus relier la question au contexte.
+    ///
+    /// Le blob chiffré, lui, garde la valeur TELLE QU'ÉCRITE la première fois :
+    /// la restitution rend la vraie orthographe, pas la forme d'index.
     async fn token_for(&self, tenant: &str, typ: &str, value: &str) -> Result<String, VaultError> {
-        let bi = self.keyring.blind_index(tenant, typ, value);
+        let bi = self.keyring.blind_index(tenant, typ, &normalize::index_form(typ, value));
         if let Some(token) = self.store.token_for_index(tenant, &bi).await? {
             return Ok(token);
         }
+
+        // Repli sur l'index historique (chaîne brute) : les jetons créés avant
+        // la normalisation sont rangés sous cet index-là. On les retrouve, et
+        // on rattache la forme canonique au même jeton pour que la variante
+        // d'écriture suivante n'ait plus à faire ce détour.
+        let legacy = self.keyring.blind_index(tenant, typ, value);
+        if legacy != bi {
+            if let Some(token) = self.store.token_for_index(tenant, &legacy).await? {
+                self.store.alias_index(tenant, &bi, &token).await?;
+                return Ok(token);
+            }
+        }
+
         let blob = self.keyring.encrypt(value);
         self.store.create_token(tenant, typ, &bi, &blob).await
+    }
+
+    /// Rattache la forme canonique de chaque valeur déjà au coffre à son jeton.
+    ///
+    /// Nécessaire une fois, pour les documents indexés AVANT la normalisation :
+    /// leur jeton est rangé sous l'index de la chaîne brute, qu'une question
+    /// écrite autrement ne reproduit pas. Sans ce rattrapage, il faudrait
+    /// réimporter les documents.
+    ///
+    /// Purement additif : aucune valeur n'est modifiée, aucun jeton n'est créé.
+    /// Rejouable sans effet de bord.
+    pub async fn reindex(&self, tenant: &str) -> Result<(usize, usize), VaultError> {
+        let entries = self.store.tokens(tenant).await?;
+        let total = entries.len();
+        let mut aliased = 0usize;
+
+        for (token, blob) in entries {
+            // Le type vit dans le nom du jeton : « PERSON_12 » -> « PERSON ».
+            let Some(typ) = token.rsplit_once('_').map(|(t, _)| t) else {
+                continue;
+            };
+            let Some(value) = self.keyring.decrypt(&blob) else {
+                continue; // blob d'une ancienne clé : on le laisse tel quel
+            };
+            let canonical = normalize::index_form(typ, &value);
+            let bi = self.keyring.blind_index(tenant, typ, &canonical);
+            if self.store.token_for_index(tenant, &bi).await?.is_none() {
+                self.store.alias_index(tenant, &bi, &token).await?;
+                aliased += 1;
+            }
+        }
+        Ok((total, aliased))
     }
 
     /// Remplace les données sensibles par des jetons. Renvoie le texte « propre »
@@ -220,6 +275,94 @@ mod tests {
 
         let restored = v.depseudonymize("_global", &clean).await.unwrap();
         assert_eq!(restored, text, "le round-trip doit restituer l'original exact");
+    }
+
+    /// Le cas qui a motivé la normalisation (30/10/2026).
+    ///
+    /// Un CV est indexé avec « MAMADOU SOUMARE ». L'utilisateur demande ensuite
+    /// « qui est soumare mamadou ? ». Avant la forme canonique, les deux
+    /// écritures recevaient deux jetons différents : le modèle lisait un
+    /// contexte sur [PERSON_1] et une question sur [PERSON_2], et répondait que
+    /// l'information ne s'y trouvait pas — alors que le bon document avait bien
+    /// été retrouvé et cité en source.
+    #[tokio::test]
+    async fn une_question_retrouve_le_nom_du_document_quelle_que_soit_l_ecriture() {
+        let v = vault();
+        let nom = |valeur: &str| {
+            vec![CustomTerm {
+                typ: "PERSON".into(),
+                value: valeur.into(),
+            }]
+        };
+
+        let (cv, _) = v
+            .pseudonymize("t1", "MAMADOU SOUMARE — développeur full stack", &nom("MAMADOU SOUMARE"))
+            .await
+            .unwrap();
+        let (question, _) = v
+            .pseudonymize("t1", "qui est soumare mamadou ?", &nom("soumare mamadou"))
+            .await
+            .unwrap();
+
+        assert!(cv.contains("[PERSON_1]"), "le CV : {cv}");
+        assert!(
+            question.contains("[PERSON_1]"),
+            "la question doit porter sur le MÊME jeton que le document : {question}"
+        );
+    }
+
+    /// La restitution rend l'orthographe d'origine, pas la forme d'index.
+    #[tokio::test]
+    async fn la_forme_canonique_ne_deteint_pas_sur_la_valeur_restituee() {
+        let v = vault();
+        let terms = vec![CustomTerm {
+            typ: "PERSON".into(),
+            value: "MAMADOU SOUMARE".into(),
+        }];
+        let (clean, _) = v.pseudonymize("t1", "Signé MAMADOU SOUMARE", &terms).await.unwrap();
+        let restored = v.depseudonymize("t1", &clean).await.unwrap();
+        assert_eq!(restored, "Signé MAMADOU SOUMARE");
+    }
+
+    /// Un numéro écrit avec ou sans espaces est le même numéro.
+    #[tokio::test]
+    async fn un_telephone_garde_son_jeton_quelle_que_soit_sa_ponctuation() {
+        let v = vault();
+        let (a, _) = v.pseudonymize("t1", "tel 0611811814", &[]).await.unwrap();
+        let (b, _) = v.pseudonymize("t1", "tel 06 11 81 18 14", &[]).await.unwrap();
+        assert!(a.contains("[PHONE_1]"), "{a}");
+        assert!(b.contains("[PHONE_1]"), "{b}");
+    }
+
+    /// Le rattrapage relie les jetons d'avant la normalisation.
+    ///
+    /// On simule l'existant en rangeant un jeton sous l'index de la chaîne
+    /// brute, comme le faisait l'ancienne version, puis on vérifie qu'après
+    /// `reindex` une autre écriture retrouve ce jeton-là.
+    #[tokio::test]
+    async fn le_rattrapage_relie_les_jetons_deja_crees() {
+        let keyring = Keyring::from_master(&[9u8; 32]);
+        let store = Arc::new(InMemoryVaultStore::new());
+
+        // Ancien schéma : index = HMAC de la chaîne brute.
+        let brut = keyring.blind_index("t1", "PERSON", "MAMADOU SOUMARE");
+        let blob = keyring.encrypt("MAMADOU SOUMARE");
+        let token = store.create_token("t1", "PERSON", &brut, &blob).await.unwrap();
+
+        let v = Vault::new(keyring, store);
+        let (examines, rattaches) = v.reindex("t1").await.unwrap();
+        assert_eq!(examines, 1);
+        assert_eq!(rattaches, 1);
+
+        let terms = vec![CustomTerm {
+            typ: "PERSON".into(),
+            value: "soumare mamadou".into(),
+        }];
+        let (question, _) = v.pseudonymize("t1", "qui est soumare mamadou ?", &terms).await.unwrap();
+        assert!(
+            question.contains(&format!("[{token}]")),
+            "la question doit retomber sur le jeton existant {token} : {question}"
+        );
     }
 
     #[tokio::test]

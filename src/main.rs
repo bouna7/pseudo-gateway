@@ -24,6 +24,7 @@ mod error;
 mod extract;
 mod keys;
 mod ner;
+mod normalize;
 mod proxy;
 mod pseudonymize;
 mod store;

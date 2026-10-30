@@ -207,6 +207,7 @@ pub fn router(state: AppState, cfg: &HttpConfig) -> Router {
             )
             .route("/admin/invitations/:code", delete(admin::revoke_invitation))
             .route("/admin/key", post(admin::rotate_admin_key))
+            .route("/admin/reindex/:tenant", post(admin::reindex))
             .route("/admin/accounts/:id/keys", post(admin::issue_key))
             .route(
                 "/admin/accounts/:id/keys/:key_id",

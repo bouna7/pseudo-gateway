@@ -38,6 +38,19 @@ pub trait VaultStore: Send + Sync {
     async fn blob_for_token(&self, tenant: &str, token: &str)
         -> Result<Option<Vec<u8>>, VaultError>;
 
+    /// Fait pointer un index aveugle de PLUS vers un jeton existant.
+    ///
+    /// Sert à rattacher la forme canonique d'une valeur au jeton qu'elle avait
+    /// déjà sous son ancien index (écriture brute). Purement additif : aucun
+    /// jeton n'est créé, aucun index existant n'est écrasé par un autre jeton.
+    async fn alias_index(&self, tenant: &str, bi: &str, token: &str) -> Result<(), VaultError>;
+
+    /// Tous les couples (jeton, blob chiffré) d'un tenant.
+    ///
+    /// Uniquement pour la ré-indexation administrative : le store ne sait
+    /// toujours pas lire le clair, c'est l'appelant qui déchiffre avec la clé.
+    async fn tokens(&self, tenant: &str) -> Result<Vec<(String, Vec<u8>)>, VaultError>;
+
     /// Sonde de disponibilité du backend (utilisée par `GET /health`).
     /// Par défaut : toujours disponible (cas du store en mémoire).
     async fn ping(&self) -> Result<(), VaultError> {
@@ -114,6 +127,25 @@ impl VaultStore for InMemoryVaultStore {
             .tokens
             .get(&(tenant.to_owned(), token.to_owned()))
             .cloned())
+    }
+
+    async fn alias_index(&self, tenant: &str, bi: &str, token: &str) -> Result<(), VaultError> {
+        let mut guard = self.inner.lock().map_err(|_| VaultError::Poisoned)?;
+        guard
+            .index
+            .entry((tenant.to_owned(), bi.to_owned()))
+            .or_insert_with(|| token.to_owned());
+        Ok(())
+    }
+
+    async fn tokens(&self, tenant: &str) -> Result<Vec<(String, Vec<u8>)>, VaultError> {
+        let guard = self.inner.lock().map_err(|_| VaultError::Poisoned)?;
+        Ok(guard
+            .tokens
+            .iter()
+            .filter(|((t, _), _)| t == tenant)
+            .map(|((_, tok), blob)| (tok.clone(), blob.clone()))
+            .collect())
     }
 }
 
@@ -215,6 +247,63 @@ impl VaultStore for RedisVaultStore {
             .await
             .map_err(|e| VaultError::Store(e.to_string()))?;
         Ok(blob)
+    }
+
+    async fn alias_index(&self, tenant: &str, bi: &str, token: &str) -> Result<(), VaultError> {
+        let key = format!("{}:bi:{}", Self::ns(tenant), bi);
+        let mut conn = self.conn.clone();
+        // NX : si cet index pointe déjà quelque part, on ne le détourne pas.
+        // Deux valeurs distinctes qui tomberaient sur la même forme canonique
+        // garderaient ainsi chacune le jeton qu'elles ont toujours eu.
+        let _: bool = redis::cmd("SET")
+            .arg(&key)
+            .arg(token)
+            .arg("NX")
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| VaultError::Store(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn tokens(&self, tenant: &str) -> Result<Vec<(String, Vec<u8>)>, VaultError> {
+        let prefix = format!("{}:tok:", Self::ns(tenant));
+        let pattern = format!("{prefix}*");
+        let mut conn = self.conn.clone();
+
+        // SCAN plutôt que KEYS : KEYS bloque Redis le temps du parcours, ce qui
+        // suspend toutes les pseudonymisations en cours. Curseur explicite
+        // plutôt que l'itérateur de la bibliothèque : l'API du curseur est
+        // stable d'une version de `redis` à l'autre.
+        let mut keys: Vec<String> = Vec::new();
+        let mut cursor: u64 = 0;
+        loop {
+            let (next, batch): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(500)
+                .query_async(&mut conn)
+                .await
+                .map_err(|e| VaultError::Store(e.to_string()))?;
+            keys.extend(batch);
+            if next == 0 {
+                break;
+            }
+            cursor = next;
+        }
+
+        let mut out = Vec::with_capacity(keys.len());
+        for key in keys {
+            let blob: Option<Vec<u8>> = conn
+                .get(&key)
+                .await
+                .map_err(|e| VaultError::Store(e.to_string()))?;
+            if let Some(blob) = blob {
+                out.push((key[prefix.len()..].to_string(), blob));
+            }
+        }
+        Ok(out)
     }
 
     async fn ping(&self) -> Result<(), VaultError> {
