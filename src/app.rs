@@ -1261,6 +1261,54 @@ mod tests {
         assert_eq!(s, StatusCode::NOT_FOUND);
     }
 
+    /// Réingestion d'un texte déjà masqué, de bout en bout (11/11/2026).
+    ///
+    /// En production, un document déjà porteur de jetons est repassé au
+    /// masquage. Il doit ressortir intact, et la restitution doit dire
+    /// franchement qu'elle n'a rien pu restituer plutôt que de rendre un texte
+    /// d'apparence normale où subsistent des jetons.
+    #[tokio::test]
+    async fn un_texte_deja_masque_ressort_intact_et_la_restitution_le_signale() {
+        let app = app(state(0));
+        let texte = "47 rue [LOC_3], 75002 [LOC_4]";
+
+        let (s, p) = call(
+            &app,
+            "POST",
+            "/v1/pseudonymize",
+            Some(("x-api-key", "interne")),
+            // Ce que Presidio propose sur un tel texte : les noms de jetons.
+            json!({
+                "text": texte,
+                "tenant_id": "doc1",
+                "custom_terms": [
+                    {"type": "LOC", "value": "LOC_3"},
+                    {"type": "LOC", "value": "LOC_4"}
+                ]
+            }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(p["text"], texte, "le texte doit ressortir intact");
+        assert_eq!(p["tokens"].as_array().unwrap().len(), 0);
+
+        let (s, r) = call(
+            &app,
+            "POST",
+            "/v1/depseudonymize",
+            Some(("x-api-key", "interne")),
+            json!({"text": texte, "tenant_id": "doc1"}),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(r["text"], texte);
+        assert_eq!(
+            r["unresolved"],
+            json!(["LOC_3", "LOC_4"]),
+            "la restitution doit nommer ce qu'elle n'a pas pu rendre"
+        );
+    }
+
     /// La racine mène à la documentation quand elle est publiée, et ne dit rien
     /// du tout sinon.
     #[tokio::test]

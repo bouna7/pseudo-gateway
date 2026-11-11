@@ -6,7 +6,7 @@ use crate::auth::{client_ip, Principal};
 use crate::error::AppError;
 use crate::extract::ApiJson;
 use crate::ner;
-use crate::pseudonymize::CustomTerm;
+use crate::pseudonymize::{self, CustomTerm};
 use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Html;
@@ -65,6 +65,13 @@ pub struct DepseudoReq {
 #[derive(Serialize, ToSchema)]
 pub struct DepseudoResp {
     pub text: String,
+    /// Jetons que cet espace n'a pas su restituer : ils ressortent tels quels
+    /// dans `text`. Une liste non vide veut dire **restitution partielle** —
+    /// à ne pas afficher à un utilisateur sans le signaler. Causes usuelles :
+    /// `tenant_id` différent de celui du masquage, ou jeton inventé par le
+    /// modèle en imitant le format qu'il voyait dans son contexte.
+    #[schema(example = json!(["ORG_1"]))]
+    pub unresolved: Vec<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -138,7 +145,13 @@ pub async fn pseudonymize(
 
     // 3) Jetonnage + chiffrement (la synchronisation vit dans le store).
     let (text, tokens) = st.vault.pseudonymize(&tenant, &req.text, &terms).await?;
-    tracing::info!(%tenant, tokens = tokens.len(), "pseudonymisation effectuée");
+    let deja = pseudonymize::jetons_presents(&req.text);
+    tracing::info!(
+        %tenant,
+        tokens = tokens.len(),
+        deja_jetonnes = deja.len(),
+        "pseudonymisation effectuée"
+    );
     Ok(Json(PseudoResp { text, tokens }))
 }
 
@@ -155,8 +168,23 @@ pub async fn depseudonymize(
     ApiJson(req): ApiJson<DepseudoReq>,
 ) -> Result<Json<DepseudoResp>, AppError> {
     let tenant = principal.tenant(req.tenant_id.as_deref())?;
-    let text = st.vault.depseudonymize(&tenant, &req.text).await?;
-    Ok(Json(DepseudoResp { text }))
+    let r = st.vault.depseudonymize_detaille(&tenant, &req.text).await?;
+    if r.non_resolus.is_empty() {
+        tracing::info!(%tenant, resolus = r.resolus, "restitution effectuée");
+    } else {
+        // Un jeton non résolu finit à l'écran tel quel : c'est le seul endroit
+        // où l'exploitant peut s'en apercevoir.
+        tracing::warn!(
+            %tenant,
+            resolus = r.resolus,
+            non_resolus = ?r.non_resolus,
+            "restitution partielle : jetons laissés tels quels"
+        );
+    }
+    Ok(Json(DepseudoResp {
+        text: r.texte,
+        unresolved: r.non_resolus,
+    }))
 }
 
 /// Compte associé à la clé et consommation du mois (non décompté du quota).
@@ -338,7 +366,17 @@ jamais interprétée ici. Les réponses en flux (SSE) sont prises en charge.
 - **Une même valeur reçoit toujours le même jeton** : `[PERSON_1]` désigne la
   même personne d'un appel à l'autre, ce qui permet à l'IA de garder le fil.
 - **Cloisonnement** : vos jetons ne sont lisibles qu'avec votre clé. Le champ
-  facultatif `tenant_id` cloisonne davantage, par dossier ou par client.
+  facultatif `tenant_id` cloisonne davantage, par dossier ou par client. La
+  numérotation des jetons repart de 1 dans chaque espace : `[EMAIL_1]` ne
+  désigne pas la même personne d'un `tenant_id` à l'autre. **Passez donc le
+  même `tenant_id` au masquage et à la restitution** — sans quoi la
+  restitution peut renvoyer la valeur d'un autre dossier.
+- **Restitution partielle** : `unresolved` liste les jetons que l'espace n'a
+  pas su restituer ; ils ressortent tels quels dans `text`. Une liste non vide
+  mérite d'être signalée à l'utilisateur plutôt qu'affichée en l'état.
+- **Texte déjà masqué** : renvoyer un texte qui contient des jetons est sans
+  danger (historique de conversation, document réindexé). Les jetons présents
+  sont sanctuarisés : ils ne sont jamais re-masqués.
 - **Limites** : au-delà de votre quota, la réponse est un `429` avec un en-tête
   `Retry-After`. `GET /v1/me` indique votre consommation du mois.
 - **Encodage** : le corps doit être en UTF-8, comme l'exige le format JSON.

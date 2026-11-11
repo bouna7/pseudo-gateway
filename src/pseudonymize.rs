@@ -42,6 +42,50 @@ static PATTERNS: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
 /// Reconnaît un jeton `[TYPE_N]` lors du dé-jetonnage.
 static TOKEN_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[([A-Z]+_\d+)\]").unwrap());
 
+/// Plages d'octets occupées par des jetons `[TYPE_N]` déjà présents.
+///
+/// Elles sont soustraites à la détection : sans cela, le NER prend le **nom**
+/// du jeton pour une donnée et le re-masque sous son propre nom. Constaté en
+/// production le 11/11/2026 : le coffre contenait une entrée `LOC_3` dont la
+/// valeur déchiffrée était la chaîne « LOC_3 ». Le compteur étant séquentiel
+/// par (espace, type), un texte réingéré portant `[LOC_1] [LOC_2] [LOC_3]`
+/// dans l'ordre produit ce point fixe, et la valeur d'origine est perdue.
+fn plages_jetonnees(text: &str) -> Vec<(usize, usize)> {
+    TOKEN_RE
+        .find_iter(text)
+        .map(|m| (m.start(), m.end()))
+        .collect()
+}
+
+/// Noms des jetons déjà présents dans un texte, sans doublon et sans crochets.
+/// Sert à la journalisation : un appel de masquage portant des jetons signale
+/// soit un historique de conversation (normal), soit une réingestion de texte
+/// déjà masqué (à surveiller).
+pub fn jetons_presents(text: &str) -> Vec<String> {
+    let mut vus = HashSet::new();
+    TOKEN_RE
+        .captures_iter(text)
+        .filter_map(|c| c.get(1).map(|g| g.as_str().to_string()))
+        .filter(|t| vus.insert(t.clone()))
+        .collect()
+}
+
+/// Résultat détaillé d'une restitution.
+///
+/// `non_resolus` est la part de vérité qui manquait : un jeton qu'aucune entrée
+/// du coffre ne couvre traverse la restitution tel quel et s'affiche à
+/// l'utilisateur. Sans ce décompte, ni l'appelant ni l'exploitant ne peuvent
+/// distinguer une restitution complète d'une restitution muette et partielle.
+pub struct Restitution {
+    pub texte: String,
+    /// Nombre de jetons remplacés par leur valeur réelle (occurrences).
+    pub resolus: usize,
+    /// Jetons laissés tels quels, sans doublon et sans crochets. Causes
+    /// possibles : mauvais espace de jetons, jeton inventé par le modèle,
+    /// valeur chiffrée sous une clé maîtresse antérieure.
+    pub non_resolus: Vec<String>,
+}
+
 /// Une correspondance détectée dans le texte : plage d'octets + type + valeur.
 struct Hit {
     start: usize,
@@ -142,6 +186,11 @@ impl Vault {
         text: &str,
         custom: &[CustomTerm],
     ) -> Result<(String, Vec<String>), VaultError> {
+        // 0) Plages déjà jetonnées. Un texte peut légitimement contenir des
+        //    jetons : l'historique d'une conversation, un document réindexé.
+        //    Ces plages sont sanctuarisées — voir `plages_jetonnees`.
+        let protegees = plages_jetonnees(text);
+
         // 1) Collecte de TOUTES les correspondances sur le texte d'origine
         //    (termes fournis + regex), avec leurs plages d'octets. On ne mute pas
         //    le texte pendant la détection (fini les collisions de sous-chaînes /
@@ -172,6 +221,10 @@ impl Vault {
                 });
             }
         }
+
+        // 1 bis) On écarte tout ce qui tombe dans un jeton déjà présent, avant
+        //    la résolution des chevauchements : un jeton n'est pas une donnée.
+        hits.retain(|h| !protegees.iter().any(|(s, e)| h.start < *e && *s < h.end));
 
         // 2) Résolution des chevauchements : les détecteurs à format strict
         //    d'abord, puis « la plus longue gagne ». Toute correspondance qui en
@@ -224,7 +277,20 @@ impl Vault {
     /// inconnus (mauvais tenant, jamais créés…) sont laissés tels quels — aucune
     /// fuite cross-tenant possible.
     pub async fn depseudonymize(&self, tenant: &str, text: &str) -> Result<String, VaultError> {
+        Ok(self.depseudonymize_detaille(tenant, text).await?.texte)
+    }
+
+    /// Comme [`Vault::depseudonymize`], en rapportant ce qui n'a pas pu être
+    /// restitué. À préférer partout où un humain lira le résultat.
+    pub async fn depseudonymize_detaille(
+        &self,
+        tenant: &str,
+        text: &str,
+    ) -> Result<Restitution, VaultError> {
         let mut result = String::with_capacity(text.len());
+        let mut resolus = 0usize;
+        let mut non_resolus: Vec<String> = Vec::new();
+        let mut vus = HashSet::new();
         let mut last = 0usize;
         for caps in TOKEN_RE.captures_iter(text) {
             // Le groupe 0 (match complet) existe toujours pour une capture.
@@ -234,17 +300,30 @@ impl Vault {
             };
             let token = caps.get(1).map(|g| g.as_str()).unwrap_or("");
             result.push_str(&text[last..whole.start()]);
+            let mut restitue = false;
             match self.store.blob_for_token(tenant, token).await? {
                 Some(blob) => match self.keyring.decrypt(&blob) {
-                    Some(value) => result.push_str(&value),
+                    Some(value) => {
+                        result.push_str(&value);
+                        restitue = true;
+                    }
                     None => result.push_str(whole.as_str()),
                 },
                 None => result.push_str(whole.as_str()),
             }
+            if restitue {
+                resolus += 1;
+            } else if vus.insert(token.to_string()) {
+                non_resolus.push(token.to_string());
+            }
             last = whole.end();
         }
         result.push_str(&text[last..]);
-        Ok(result)
+        Ok(Restitution {
+            texte: result,
+            resolus,
+            non_resolus,
+        })
     }
 }
 
@@ -439,5 +518,104 @@ mod tests {
         // A restitue correctement le sien.
         let out_a = v.depseudonymize("A", "[EMAIL_1]").await.unwrap();
         assert_eq!(out_a, "secret-a@x.fr");
+    }
+
+    /// Le cas qui a motivé la sanctuarisation des jetons (11/11/2026).
+    ///
+    /// Un texte déjà masqué repasse au masquage — réingestion d'un document,
+    /// ou historique de conversation renvoyé avec la question. Le NER y voit
+    /// « LOC_3 » et le propose comme localisation. Si on le masquait, le coffre
+    /// se retrouverait avec une entrée dont la valeur est un nom de jeton, et
+    /// l'adresse d'origine ne serait plus restituable par personne.
+    #[tokio::test]
+    async fn un_texte_deja_jetonne_ne_se_remasque_pas() {
+        let v = vault();
+        let texte = "47 rue [LOC_3], 75002 [LOC_4]";
+        // Ce que renvoie Presidio sur un tel texte : les noms de jetons eux-mêmes.
+        let terms = vec![
+            CustomTerm {
+                typ: "LOC".into(),
+                value: "LOC_3".into(),
+            },
+            CustomTerm {
+                typ: "LOC".into(),
+                value: "LOC_4".into(),
+            },
+        ];
+
+        let (clean, tokens) = v.pseudonymize("t1", texte, &terms).await.unwrap();
+
+        assert_eq!(clean, texte, "le texte doit ressortir intact");
+        assert!(
+            tokens.is_empty(),
+            "aucun jeton ne doit être créé pour un nom de jeton : {tokens:?}"
+        );
+        // Et surtout : le coffre ne contient pas « LOC_3 » comme valeur.
+        let out = v.depseudonymize("t1", "[LOC_3]").await.unwrap();
+        assert_eq!(out, "[LOC_3]");
+    }
+
+    /// Une vraie donnée voisine d'un jeton reste masquée : la sanctuarisation
+    /// ne couvre que les plages des jetons, pas le reste de la phrase.
+    #[tokio::test]
+    async fn une_donnee_a_cote_d_un_jeton_reste_masquee() {
+        let v = vault();
+        let (clean, tokens) = v
+            .pseudonymize("t1", "[PERSON_1] écrit à marie@exemple.fr", &[])
+            .await
+            .unwrap();
+        assert_eq!(clean, "[PERSON_1] écrit à [EMAIL_1]");
+        assert_eq!(tokens, vec!["EMAIL_1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn la_restitution_signale_les_jetons_non_resolus() {
+        let v = vault();
+        v.pseudonymize("t1", "marie@exemple.fr", &[]).await.unwrap();
+
+        let r = v
+            .depseudonymize_detaille("t1", "[EMAIL_1] vu avec [ORG_1] et [ORG_1]")
+            .await
+            .unwrap();
+
+        assert_eq!(r.texte, "marie@exemple.fr vu avec [ORG_1] et [ORG_1]");
+        assert_eq!(r.resolus, 1);
+        assert_eq!(
+            r.non_resolus,
+            vec!["ORG_1".to_string()],
+            "un même jeton non résolu ne doit être signalé qu'une fois"
+        );
+    }
+
+    /// Ce que l'isolation ne protège **pas**, et qu'il faut documenter.
+    ///
+    /// Le compteur de jetons est propre à chaque (espace, type) : deux
+    /// sous-espaces d'un même compte attribuent tous deux `EMAIL_1`, à des
+    /// valeurs différentes. Restituer dans le mauvais espace ne renvoie donc
+    /// pas toujours le jeton intact : cela peut renvoyer, sans aucun signal,
+    /// la donnée de quelqu'un d'autre. `non_resolus` ne rattrape pas ce cas —
+    /// le jeton est résolu, simplement vers la mauvaise personne. Seul
+    /// l'appelant peut l'éviter, en passant le même `tenant_id` au masquage et
+    /// à la restitution.
+    #[tokio::test]
+    async fn un_meme_libelle_designe_deux_personnes_dans_deux_sous_espaces() {
+        let v = vault();
+        let (a, _) = v
+            .pseudonymize("cpt", "reelle@client.fr", &[])
+            .await
+            .unwrap();
+        let (b, _) = v
+            .pseudonymize("cpt:dossier", "autre@client.fr", &[])
+            .await
+            .unwrap();
+        assert_eq!(a, "[EMAIL_1]");
+        assert_eq!(b, "[EMAIL_1]", "les compteurs sont indépendants par espace");
+
+        let r = v.depseudonymize_detaille("cpt", &b).await.unwrap();
+        assert_eq!(r.texte, "reelle@client.fr", "substitution silencieuse");
+        assert!(
+            r.non_resolus.is_empty(),
+            "rien ne signale l'erreur : le jeton a bien été résolu"
+        );
     }
 }
