@@ -251,9 +251,52 @@ conteneurs qui se parlent). Deux fichiers au choix :
 2. **Onglet Domains** : votre domaine → service **`gateway`**, port **8080**,
    HTTPS. Health check : `GET /health`. Aucun port n'est publié sur l'hôte :
    Traefik joint le conteneur par le réseau interne du compose.
-3. **Onglet Environment** : coller le bloc ci-dessous. Redis et Presidio font
-   partie de la pile, rien à provisionner à côté ; `VAULT_STORE`, `REDIS_URL`,
+3. **Onglet Environment** : coller le bloc ci-dessous. Redis fait partie de la
+   pile, rien à provisionner à côté ; `VAULT_STORE`, `REDIS_URL`,
    `PRESIDIO_URL` et `TRUST_PROXY` sont déjà fixés par le compose.
+4. **Presidio, lui, se pose à part** — lire la section suivante avant le
+   premier déploiement, sans quoi vous servirez du texte à moitié masqué.
+
+### Presidio (NER) vit hors compose
+
+Le service `presidio` des deux fichiers est **désactivé par défaut** (profil
+`ner-compose`). Constaté le 2026-11-11 en production : un conteneur presidio
+créé par `docker compose` n'amorce jamais son worker gunicorn — son journal
+s'arrête après `Control socket listening`, sans `Booting worker` et sans
+erreur. Le port écoute, aucune requête n'est servie, et la passerelle retombe
+**en silence** sur ses quatre regex : e-mails, téléphones, IBAN et cartes sont
+masqués, mais les noms, les villes et les organisations partent en clair au
+modèle. Deux fuites de ce genre ont duré 2 h 45 et 45 min.
+
+Le même conteneur, la même image et la même variable d'environnement lancés par
+`docker run` servent correctement — vérifié six fois, en faisant varier l'image,
+le niveau de journal, le réseau de la pile, l'attachement des flux et la
+politique de redémarrage. La cause reste inconnue. Ni `docker restart` ni
+`compose up --force-recreate` ne guérissent le conteneur fautif, donc aucun
+redémarrage automatique n'y change rien.
+
+Sur le serveur, après le premier déploiement de la pile :
+
+```bash
+# Le réseau est celui créé par la pile compose (docker network ls)
+RESEAU=<pile>_default ./presidio/presidio-autonome.sh
+```
+
+Le script construit l'image, démarre un candidat **sans** le nom d'hôte
+`presidio`, exige de lui qu'il **détecte** une personne dans un texte témoin,
+et ne bascule qu'ensuite — en laissant la production intacte s'il échoue. Un
+port qui écoute ne prouve rien : c'est précisément l'erreur qui a coûté les
+2 h 45 de fuite.
+
+Le conteneur posé survit aux redémarrages de la machine, mais **pas** à un
+`docker compose down`. Après chaque opération qui détruit la pile, relancer le
+script, puis vérifier `GET /health/ner` (voir la checklist).
+
+En développement local, où compose se comporte normalement :
+
+```bash
+docker compose --profile ner-compose up
+```
 
 ```bash
 # Chiffrement — `pseudo-gateway gen-keys` les génère (obligatoire)
@@ -312,7 +355,12 @@ librement son `tenant_id` et lit donc les jetons de n'importe quel compte. Elle
 est faite pour vos propres services — ne la donnez jamais à un client externe,
 donnez-lui une clé de compte `pgw_…`.
 
-`/health` reste ouvert pour les sondes.
+| 9 | `GET /health/ner` répond **200** après chaque déploiement | `/health` répond « ok » même avec un NER mort : seuls les e-mails et les téléphones seraient masqués, les noms partiraient en clair |
+
+`/health` et `/health/ner` restent ouverts pour les sondes. Surveillez le
+second : c'est le seul qui voie la détection automatique. Au démarrage, la
+passerelle le vérifie elle-même et logue un `ERROR` explicite si le NER est
+muet.
 
 ## Installer partout (Linux, Windows, macOS — x86_64 et ARM64)
 

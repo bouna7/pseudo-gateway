@@ -37,7 +37,30 @@ services:
   # Image custom (./presidio) : image officielle + modèle spaCy FRANÇAIS
   # (fr_core_news_lg) — l'officielle seule n'a que l'anglais et rate une
   # partie des noms/villes sur les documents français.
+  #
+  # ⚠️ SERVICE DÉSACTIVÉ PAR DÉFAUT (profil `ner-compose`) — lire ceci avant
+  # de le réactiver. Constaté le 2026-11-11 sur le VPS de production : un
+  # conteneur presidio **créé par compose** n'amorce jamais son worker
+  # gunicorn. Le journal s'arrête après `Control socket listening`, sans
+  # `Booting worker`, sans erreur : le master écoute, rien n'est jamais servi,
+  # et la passerelle retombe en silence sur ses quatre regex — les noms, les
+  # villes et les organisations partent alors EN CLAIR au modèle. 2 h 45 de
+  # fuite ce jour-là, et 45 min le 2026-07-18.
+  #
+  # Le même conteneur, la même image et la même variable lancés par
+  # `docker run` servent correctement : vérifié six fois, en faisant varier
+  # l'image, le niveau de journal, le réseau de la pile, l'attachement des
+  # flux et la politique de redémarrage. La cause reste inconnue ; ni un
+  # `docker restart` ni un `compose up --force-recreate` ne guérissent le
+  # conteneur fautif, donc aucun gardien automatique n'y changerait rien.
+  #
+  # D'où ce choix : en production, Presidio vit HORS compose, posé et vérifié
+  # par `presidio/presidio-autonome.sh` (il refuse de basculer si le candidat
+  # ne détecte rien). Le service ci-dessous reste pour le développement local
+  # et les hébergeurs où compose se comporte normalement :
+  #     docker compose --profile ner-compose up
   presidio:
+    profiles: ["ner-compose"]
     build: ./presidio
     restart: unless-stopped
     environment:
@@ -117,20 +140,15 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      # service_started (PAS service_healthy) : le NER est best-effort, le
-      # gateway ne doit JAMAIS être bloqué au démarrage par Presidio.
-      #
-      # Ce choix tient, mais il a un prix, payé deux fois : un déploiement
-      # réussit pendant que la détection est morte. Ce qui le rend désormais
-      # visible, sans bloquer le démarrage :
-      #   - la sonde de `presidio` ci-dessus (le conteneur passe « unhealthy ») ;
-      #   - un `ERROR` dans les journaux du gateway au démarrage (cf. main.rs) ;
-      #   - `GET /health/ner`, qui répond 503 quand le NER est muet — c'est
-      #     celui-là qu'il faut surveiller, pas `/health`.
-      # Pour exiger au contraire un NER sain avant de servir (au risque de ne
-      # pas démarrer du tout), remplacer par : condition: service_healthy
-      presidio:
-        condition: service_started
+    # Aucune dépendance déclarée vers `presidio` : il est désactivé par défaut
+    # (profil `ner-compose`, cf. plus haut), et un `depends_on` vers un service
+    # non activé fait échouer `compose up`. Le NER est de toute façon
+    # best-effort : le gateway ne doit JAMAIS être bloqué au démarrage par lui.
+    #
+    # Son absence n'est plus silencieuse pour autant :
+    #   - un `ERROR` dans les journaux du gateway au démarrage (cf. main.rs) ;
+    #   - `GET /health/ner`, qui répond 503 quand le NER est muet — c'est
+    #     celui-là qu'il faut surveiller, pas `/health`.
     restart: unless-stopped
 
 volumes:

@@ -26,7 +26,14 @@ services:
   # NER (noms, lieux, organisations) : modèle FRANÇAIS embarqué dans l'image.
   # Tourne dans votre périmètre, aucune donnée ne sort. ~2 Go de RAM, 30-60 s
   # de chargement au premier démarrage.
+  # ⚠️ DÉSACTIVÉ PAR DÉFAUT (profil `ner-compose`) : un presidio créé par
+  # compose n'amorce pas son worker gunicorn sur le VPS de production — le
+  # port écoute, rien n'est servi, et les noms partent en clair. Explication
+  # complète et marche à suivre dans docker-compose.yml. En production,
+  # Presidio vit hors compose : presidio/presidio-autonome.sh.
+  #     docker compose -f docker-compose.images.yml --profile ner-compose up
   presidio:
+    profiles: ["ner-compose"]
     image: ghcr.io/bouna7/pseudo-gateway-presidio:${PGW_VERSION:-0.5.3}
     restart: unless-stopped
     environment:
@@ -98,10 +105,10 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      # service_started (PAS service_healthy) : le NER est best effort, le
-      # gateway ne doit JAMAIS être bloqué au démarrage par Presidio.
-      presidio:
-        condition: service_started
+    # Aucune dépendance vers `presidio` : désactivé par défaut (cf. plus haut),
+    # et un depends_on vers un service non activé fait échouer `compose up`.
+    # Le NER est best effort : le gateway ne doit jamais être bloqué par lui.
+    # Son absence se voit dans les journaux au démarrage et sur /health/ner.
     restart: unless-stopped
 
 volumes:
