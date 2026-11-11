@@ -66,6 +66,11 @@ pub enum AppError {
     /// Bonne route, mauvaise méthode HTTP.
     #[error("méthode non autorisée sur cet endpoint : {0}")]
     MethodNotAllowed(String),
+    /// Un service dont dépend la passerelle ne répond pas. Sert aux sondes :
+    /// un `503` est ce qu'un orchestrateur sait lire, là où un `200 ok` lui
+    /// laisse croire qu'un déploiement dégradé a réussi.
+    #[error("{0}")]
+    Unavailable(String),
     /// Erreur interne du coffre.
     #[error(transparent)]
     Vault(#[from] VaultError),
@@ -91,6 +96,7 @@ impl IntoResponse for AppError {
             AppError::Upstream(_) => (StatusCode::BAD_GATEWAY, "upstream_error"),
             AppError::UnknownRoute(_) => (StatusCode::NOT_FOUND, "not_found"),
             AppError::MethodNotAllowed(_) => (StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed"),
+            AppError::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
             AppError::Vault(_) => (StatusCode::INTERNAL_SERVER_ERROR, "vault_error"),
         };
         // On logge le message technique, jamais une valeur en clair.

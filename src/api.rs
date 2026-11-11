@@ -116,6 +116,27 @@ pub async fn health(State(st): State<AppState>) -> Result<&'static str, AppError
     Ok("ok")
 }
 
+/// Sonde approfondie : vérifie que la détection automatique sert vraiment.
+///
+/// Séparée de `/health` à dessein. `/health` dit si la passerelle peut
+/// travailler ; celle-ci dit si elle travaille *bien*. Les router ensemble
+/// aurait fait couper le trafic à la première panne du NER — alors qu'une
+/// passerelle en repli regex vaut mieux que pas de passerelle. C'est donc
+/// celle-ci qu'il faut sonder depuis l'orchestrateur ou la supervision : un
+/// `200 ok` sur `/health` n'a jamais rien promis sur les noms et les lieux.
+#[utoipa::path(get, path = "/health/ner", tag = "système",
+    responses((status = 200, description = "Détection automatique opérationnelle", body = String),
+              (status = 503, description = "NER injoignable ou muet", body = ErrorBody)))]
+pub async fn health_ner() -> Result<String, AppError> {
+    match ner::sonde().await {
+        Ok(n) => Ok(format!("ok — {n} entites detectees sur le texte temoin\n")),
+        Err(e) => {
+            tracing::error!(raison = %e, "sonde NER en échec");
+            Err(AppError::Unavailable(e))
+        }
+    }
+}
+
 /// Remplace les données sensibles par des jetons réversibles.
 #[utoipa::path(post, path = "/v1/pseudonymize", tag = "pseudonymisation",
     request_body = PseudoReq,
@@ -394,7 +415,7 @@ jamais interprétée ici. Les réponses en flux (SSE) sont prises en charge.
         (name = "admin", description = "Gestion des comptes et des clés (réservé à l'exploitant).")
     ),
     paths(
-        health, pseudonymize, depseudonymize, me, signup,
+        health, health_ner, pseudonymize, depseudonymize, me, signup,
         crate::admin::reindex,
         crate::admin::create_account, crate::admin::list_accounts, crate::admin::get_account,
         crate::admin::update_account, crate::admin::issue_key, crate::admin::revoke_key,

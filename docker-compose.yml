@@ -28,7 +28,9 @@ services:
   # appel : les NOMS et VILLES partent en clair au LLM — c'était le cas en
   # prod depuis le début (constaté le 2026-07-18 via l'aperçu confidentialité).
   #
-  # La détection reste best-effort (src/ner.rs) : le gateway démarre et répond
+
+
+   # La détection reste best-effort (src/ner.rs) : le gateway démarre et répond
   # même si Presidio est down ou encore en train de charger ses modèles
   # (~30-60 s au premier démarrage). RAM ≈ 2 Go (modèles FR + EN en mémoire).
   #
@@ -47,6 +49,21 @@ services:
       GUNICORN_CMD_ARGS: "--timeout 300"
     # Pas de port hôte (règle Dokploy, cf. en-tête) : joignable uniquement via
     # le réseau interne du compose, sur son port 3000.
+    #
+    # Sonde qui exige une DÉTECTION, pas un port ouvert. L'image en embarque
+    # une qui interroge /health : le 2026-11-11 elle a signalé « unhealthy »
+    # pendant 2 h 45 (302 échecs d'affilée) sans que rien ne s'en émeuve,
+    # pendant que les noms et les villes partaient en clair au modèle. Celle-ci
+    # vérifie que le modèle répond ET qu'il reconnaît une personne.
+    #
+    # start_period long : charger fr_core_news_lg prend 20 à 60 s, et l'échec
+    # d'une sonde pendant ce temps-là est normal, pas une panne.
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -sf -m 10 -X POST localhost:3000/analyze -H "Content-Type: application/json" -d "{\"text\":\"Jean Martin habite a Lyon\",\"language\":\"fr\"}" | grep -q PERSON']
+      interval: 30s
+      timeout: 12s
+      retries: 3
+      start_period: 120s
 
   gateway:
     build: .
@@ -102,6 +119,16 @@ services:
         condition: service_healthy
       # service_started (PAS service_healthy) : le NER est best-effort, le
       # gateway ne doit JAMAIS être bloqué au démarrage par Presidio.
+      #
+      # Ce choix tient, mais il a un prix, payé deux fois : un déploiement
+      # réussit pendant que la détection est morte. Ce qui le rend désormais
+      # visible, sans bloquer le démarrage :
+      #   - la sonde de `presidio` ci-dessus (le conteneur passe « unhealthy ») ;
+      #   - un `ERROR` dans les journaux du gateway au démarrage (cf. main.rs) ;
+      #   - `GET /health/ner`, qui répond 503 quand le NER est muet — c'est
+      #     celui-là qu'il faut surveiller, pas `/health`.
+      # Pour exiger au contraire un NER sain avant de servir (au risque de ne
+      # pas démarrer du tout), remplacer par : condition: service_healthy
       presidio:
         condition: service_started
     restart: unless-stopped

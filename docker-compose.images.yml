@@ -33,6 +33,13 @@ services:
       # Sans marge, le chargement du modèle spaCy depasse le délai par défaut du
       # worker gunicorn : le port est ouvert mais aucune requête n'est servie.
       GUNICORN_CMD_ARGS: "--timeout 300"
+    # Sonde qui exige une détection et pas un port ouvert (cf. docker-compose.yml).
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -sf -m 10 -X POST localhost:3000/analyze -H "Content-Type: application/json" -d "{\"text\":\"Jean Martin habite a Lyon\",\"language\":\"fr\"}" | grep -q PERSON']
+      interval: 30s
+      timeout: 12s
+      retries: 3
+      start_period: 120s
 
   gateway:
     image: ghcr.io/bouna7/pseudo-gateway:${PGW_VERSION:-0.5.3}

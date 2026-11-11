@@ -61,6 +61,41 @@ pub async fn analyze(text: &str) -> Result<Vec<PresidioEntity>, reqwest::Error> 
         .await
 }
 
+/// Texte témoin de la sonde. Un modèle sain en tire une personne et un lieu ;
+/// aucune des quatre regex de la passerelle ne les reconnaîtrait.
+const TEMOIN: &str = "Jean Martin habite a Lyon";
+
+/// Vérifie que la détection automatique fonctionne vraiment.
+///
+/// Distingue trois états que rien ne séparait jusqu'ici, la passerelle
+/// répondant « ok » dans les trois cas :
+///   - Presidio injoignable ou muet (worker mort : le port écoute, personne
+///     ne répond — vu en prod le 2026-07-18 **et** le 2026-11-11) ;
+///   - Presidio répond mais ne détecte rien (conf de langue ou de modèle
+///     cassée, mapping NER perdu) ;
+///   - Presidio en état de servir.
+///
+/// Les deux premiers cas laissent partir les noms et les villes en clair au
+/// modèle, sans aucun signal. D'où une sonde qui exige une **détection**, pas
+/// seulement une réponse HTTP.
+pub async fn sonde() -> Result<usize, String> {
+    let entities = analyze(TEMOIN)
+        .await
+        .map_err(|e| format!("Presidio injoignable ({}) : {e}", presidio_url()))?;
+    let utiles = entities
+        .iter()
+        .filter(|e| map_type(&e.entity_type).is_some())
+        .count();
+    if utiles == 0 {
+        return Err(format!(
+            "Presidio repond mais ne detecte rien sur le texte temoin \
+             (langue demandee : {}) — les noms et les lieux partent en clair",
+            presidio_lang()
+        ));
+    }
+    Ok(utiles)
+}
+
 /// Mappe un type Presidio vers un type de jeton interne. `None` = type ignoré
 /// (URL, DATE_TIME… souvent faux positifs ou non sensibles).
 pub fn map_type(presidio_type: &str) -> Option<&'static str> {

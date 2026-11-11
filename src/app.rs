@@ -162,6 +162,7 @@ pub fn router(state: AppState, cfg: &HttpConfig) -> Router {
 
     let mut app = Router::new()
         .route("/health", get(api::health))
+        .route("/health/ner", get(api::health_ner))
         .route("/v1/signup", post(api::signup))
         .merge(counted)
         .merge(uncounted);
@@ -1307,6 +1308,23 @@ mod tests {
             json!(["LOC_3", "LOC_4"]),
             "la restitution doit nommer ce qu'elle n'a pas pu rendre"
         );
+    }
+
+    /// Les deux sondes ne disent pas la même chose, et c'est tout l'intérêt.
+    ///
+    /// `/health` répond « ok » tant que la passerelle peut travailler — y
+    /// compris en repli regex, NER mort. `/health/ner` est la seule à le voir.
+    /// Aucun Presidio ne tourne pendant les tests : la sonde doit donc échouer.
+    #[tokio::test]
+    async fn la_sonde_ner_echoue_quand_presidio_est_absent() {
+        let app = app(state(0));
+
+        let (s, _) = call(&app, "GET", "/health", None, json!({})).await;
+        assert_eq!(s, StatusCode::OK, "/health ne dépend pas du NER");
+
+        let (s, e) = call(&app, "GET", "/health/ner", None, json!({})).await;
+        assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(e["error"], "unavailable");
     }
 
     /// La racine mène à la documentation quand elle est publiée, et ne dit rien

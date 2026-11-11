@@ -2,11 +2,12 @@
 //!
 //! Endpoints HTTP (voir `/docs` si `ENABLE_DOCS=true`) :
 //!   POST /v1/pseudonymize   { text, custom_terms?, tenant_id? } -> { text, tokens }
-//!   POST /v1/depseudonymize { text, tenant_id? }                -> { text }
+//!   POST /v1/depseudonymize { text, tenant_id? }                -> { text, unresolved }
 //!   GET  /v1/me                                                 -> compte + consommation
 //!   POST /v1/signup         { name, email }                     -> compte + clé (si PUBLIC_SIGNUP)
 //!   /admin/*                gestion des comptes et clés        (si ADMIN_API_KEY)
-//!   GET  /health                                                -> "ok"
+//!   GET  /health                                                -> "ok" (store joignable)
+//!   GET  /health/ner                                            -> 503 si le NER est muet
 //!
 //! `/pseudonymize` et `/depseudonymize` (sans `/v1`) restent servis pour les
 //! clients historiques.
@@ -452,6 +453,7 @@ async fn main() {
         version = env!("CARGO_PKG_VERSION"),
         "Passerelle de pseudonymisation prête sur http://{addr}"
     );
+    tokio::spawn(sonde_ner_au_demarrage());
     if let Err(e) = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
@@ -461,4 +463,42 @@ async fn main() {
     {
         fail("le serveur s'est arrêté", e);
     }
+}
+
+/// Dit au démarrage si la détection automatique sert, ou non.
+///
+/// Elle est volontairement tolérante à l'exécution (cf. `src/ner.rs`), ce qui
+/// est le bon choix — mais, jusqu'ici, un NER mort ne laissait **aucune trace**
+/// au démarrage : la passerelle annonçait qu'elle était prête et masquait les
+/// e-mails en taisant que les noms et les villes partaient en clair. Deux
+/// pannes de ce type ont duré des heures faute de cette ligne (2026-07-18 et
+/// 2026-11-11).
+///
+/// Plusieurs tentatives espacées : Presidio met 20 à 60 s à charger son modèle,
+/// et il démarre en même temps que nous.
+async fn sonde_ner_au_demarrage() {
+    const ATTENTES: [u64; 4] = [15, 30, 60, 60];
+    let mut derniere = String::new();
+    for (essai, attente) in ATTENTES.iter().enumerate() {
+        tokio::time::sleep(std::time::Duration::from_secs(*attente)).await;
+        match ner::sonde().await {
+            Ok(n) => {
+                tracing::info!(
+                    entites = n,
+                    "détection automatique opérationnelle (noms, lieux, organisations)"
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::debug!(essai = essai + 1, raison = %e, "sonde NER : pas encore prête");
+                derniere = e;
+            }
+        }
+    }
+    tracing::error!(
+        raison = %derniere,
+        "DÉTECTION AUTOMATIQUE HORS SERVICE : seuls e-mails, téléphones, IBAN et \
+         cartes seront masqués. Les noms, villes et organisations partiront EN CLAIR \
+         au modèle. Diagnostic : GET /health/ner"
+    );
 }

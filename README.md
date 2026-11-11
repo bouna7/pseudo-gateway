@@ -477,7 +477,10 @@ des octets chiffrés et des **index aveugles**.
 - **Isolation tenant** : champ `tenant_id` optionnel sur les 2 endpoints (défaut
   `_global`, rétro-compatible). Espaces de jetons disjoints, aucune restitution croisée.
 - **Robustesse** : handlers `Result<_, AppError>` (plus de `.unwrap()`), logs `tracing`
-  (jamais de valeur en clair), endpoint `GET /health`.
+  (jamais de valeur en clair), endpoint `GET /health`. `GET /health/ner`
+  sonde en plus la détection automatique et répond `503` si elle est muette :
+  c'est celle-là qu'il faut surveiller, `/health` répondant « ok » alors que
+  les noms et les lieux partiraient en clair.
 
 **Coffre persistant** : `VAULT_STORE=redis` bascule sur `RedisVaultStore` (création
 de jeton atomique via script Lua, clés namespacées `pg:{tenant}:…`). Le jeton survit
