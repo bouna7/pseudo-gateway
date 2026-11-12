@@ -42,8 +42,10 @@ fn fold(c: char) -> char {
     }
 }
 
-/// Minuscules, sans accents, espaces normalisés.
-fn base(value: &str) -> String {
+/// Minuscules, sans accents, espaces normalisés. Partagé avec
+/// [`crate::adresse`], qui compare des mots à ses listes de particules et de
+/// mots d'arrêt — même repliage, donc « À » et « a » s'y lisent pareil.
+pub(crate) fn base(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     let mut space_pending = false;
     for c in value.chars().flat_map(char::to_lowercase).map(fold) {
@@ -90,6 +92,12 @@ pub fn index_form(typ: &str, value: &str) -> String {
             words.sort_unstable();
             words.join(" ")
         }
+
+        // Une adresse s'écrit avec ou sans virgule après le numéro, et se
+        // replie parfois avant le code postal : « 12, rue des Lilas » et
+        // « 12 rue des Lilas » sont la même adresse, et doivent donc partager
+        // leur jeton. La ponctuation rejoint les espaces, que `base` réduit.
+        "ADDRESS" => base(&value.replace([',', ';', '\n', '\r'], " ")),
 
         _ => base(value),
     }
@@ -151,6 +159,26 @@ mod tests {
     #[test]
     fn une_adresse_email_ne_depend_pas_de_la_casse() {
         assert_eq!(index_form("EMAIL", "Contact@RoostDrive.com"), index_form("EMAIL", "contact@roostdrive.com"));
+    }
+
+    #[test]
+    fn une_adresse_se_reconnait_quelle_que_soit_sa_ponctuation() {
+        let reference = index_form("ADDRESS", "12 rue des Lilas 75011 Paris");
+        for ecriture in [
+            "12, rue des Lilas, 75011 Paris",
+            "12 RUE DES LILAS, 75011 PARIS",
+            "12 rue des Lilas\n75011 Paris",
+        ] {
+            assert_eq!(index_form("ADDRESS", ecriture), reference, "« {ecriture} »");
+        }
+    }
+
+    #[test]
+    fn deux_numeros_differents_dans_la_meme_rue_restent_deux_adresses() {
+        assert_ne!(
+            index_form("ADDRESS", "12 rue des Lilas"),
+            index_form("ADDRESS", "14 rue des Lilas")
+        );
     }
 
     #[test]

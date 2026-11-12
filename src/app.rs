@@ -1290,8 +1290,11 @@ mod tests {
         )
         .await;
         assert_eq!(s, StatusCode::OK);
-        assert_eq!(p["text"], texte, "le texte doit ressortir intact");
-        assert_eq!(p["tokens"].as_array().unwrap().len(), 0);
+        // Les jetons ressortent intacts ; le numéro de voie « 47 rue », que la
+        // passerelle de l'époque laissait en clair devant eux, est désormais
+        // masqué par le détecteur d'adresses.
+        assert_eq!(p["text"], "[ADDRESS_1] [LOC_3], 75002 [LOC_4]");
+        assert_eq!(p["tokens"], json!(["ADDRESS_1"]));
 
         let (s, r) = call(
             &app,

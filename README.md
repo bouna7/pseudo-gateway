@@ -194,11 +194,22 @@ Ce qu'il faut savoir avant de s'en servir :
 
 Deux niveaux de détection :
 
-1. **Regex** (intégré) : EMAIL, IBAN, CARD (carte 16 chiffres), PHONE (format FR).
+1. **Regex** (intégré) : EMAIL, IBAN, CARD (carte 16 chiffres), PHONE (format FR),
+   ADDRESS (adresse postale française).
 2. **NER Presidio** (optionnel) : PERSON, ORG, LOCATION… détectés automatiquement
    si le service Presidio tourne (voir `integrations/ner/`). Lancez-le avec
    `docker compose up -d`. Si Presidio est indisponible, la passerelle continue
    sans erreur (regex + `custom_terms` seulement).
+
+Le détecteur d'adresses (`src/adresse.rs`) existe parce que le NER étiquette la
+voie mais **jamais le numéro** qui la précède : un nombre seul n'est pas une
+entité, et « 12 rue des Lilas a Lyon » ressortait en « 12 `[LOC_1]` a `[LOC_2]` »
+— or c'est le numéro qui désigne un foyer parmi les quelques centaines d'une rue.
+Il reconnaît « numéro + type de voie », étendu sur le nom de la voie puis sur le
+code postal et la commune s'ils suivent, **sans Presidio** (donc aussi quand il
+est hors service). Il ne reconnaît pas un code postal seul : `\d{5}` suivi d'un
+mot capitalisé attrape aussi « 35000 Euros ». Limites et choix détaillés en tête
+du module.
 
 Avec Presidio actif, les `custom_terms` deviennent **optionnels** : plus besoin de
 lister les noms à la main. Variables d'environnement : `PRESIDIO_URL`

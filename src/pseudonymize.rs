@@ -12,6 +12,7 @@
 //! La persistance passe par le trait [`VaultStore`] : ni le clair ni les clés ne
 //! transitent par le store.
 
+use crate::adresse;
 use crate::error::VaultError;
 use crate::normalize;
 use crate::keys::Keyring;
@@ -92,9 +93,55 @@ struct Hit {
     end: usize,
     typ: String,
     value: String,
-    /// Détecteur à format strict (regex : EMAIL, IBAN, CARD, PHONE) par opposition
-    /// aux termes fournis et au NER, qui sont probabilistes.
+    /// Détecteur à format strict (regex : EMAIL, IBAN, CARD, PHONE, ADDRESS) par
+    /// opposition aux termes fournis et au NER, qui sont probabilistes.
+    ///
+    /// Une adresse en est : « numéro + type de voie » n'est pas une devinette
+    /// statistique, et elle doit primer sur le `LOC` que le NER pose sur la
+    /// seule voie. Elle n'écarte pas pour autant ce `LOC`, elle l'absorbe —
+    /// voir [`fusionner_adresses`].
     strict: bool,
+}
+
+/// Étend chaque adresse sur les lieux qui la chevauchent, puis écarte ces
+/// lieux — désormais couverts par la plage de l'adresse.
+///
+/// Seuls les lieux sont absorbés. Une personne ou un courriel qui chevaucherait
+/// une adresse relève d'une détection fausse, pas d'une adresse plus longue :
+/// l'absorber rangerait sa valeur sous le type `ADDRESS`, et la même valeur
+/// rencontrée ailleurs recevrait un autre jeton.
+///
+/// Les lieux sont pris dans l'ordre du texte, si bien qu'une adresse étendue par
+/// le premier absorbe aussi celui qui ne la touchait qu'après extension.
+fn fusionner_adresses(text: &str, hits: &mut Vec<Hit>) {
+    let mut lieux: Vec<(usize, usize)> = hits
+        .iter()
+        .filter(|h| h.typ == "LOC")
+        .map(|h| (h.start, h.end))
+        .collect();
+    if lieux.is_empty() {
+        return;
+    }
+    lieux.sort_unstable();
+
+    for h in hits.iter_mut().filter(|h| h.typ == "ADDRESS") {
+        for (debut, fin) in &lieux {
+            if h.start < *fin && *debut < h.end {
+                h.start = h.start.min(*debut);
+                h.end = h.end.max(*fin);
+            }
+        }
+        h.value = text[h.start..h.end].to_string();
+    }
+
+    let adresses: Vec<(usize, usize)> = hits
+        .iter()
+        .filter(|h| h.typ == "ADDRESS")
+        .map(|h| (h.start, h.end))
+        .collect();
+    hits.retain(|h| {
+        h.typ != "LOC" || !adresses.iter().any(|(d, f)| h.start < *f && *d < h.end)
+    });
 }
 
 /// Coffre logique : détient les clés (chiffrement + blind index) et délègue la
@@ -222,9 +269,31 @@ impl Vault {
             }
         }
 
-        // 1 bis) On écarte tout ce qui tombe dans un jeton déjà présent, avant
+        // 1 bis) Adresses postales. Le NER étiquette la voie mais jamais le
+        //    numéro qui la précède — un nombre seul n'est pas une entité — et
+        //    laissait donc « 12 » en clair devant un `[LOC_1]`. Voir
+        //    [`crate::adresse`] pour le détail de la détection et ses limites.
+        for (start, end) in adresse::trouver(text) {
+            hits.push(Hit {
+                start,
+                end,
+                typ: "ADDRESS".to_string(),
+                value: text[start..end].to_string(),
+                strict: true,
+            });
+        }
+
+        // 1 ter) On écarte tout ce qui tombe dans un jeton déjà présent, avant
         //    la résolution des chevauchements : un jeton n'est pas une donnée.
         hits.retain(|h| !protegees.iter().any(|(s, e)| h.start < *e && *s < h.end));
+
+        // 1 quater) Une adresse ABSORBE les lieux qui la chevauchent au lieu de
+        //    les supplanter. Sans cela, un NER qui étiquette « rue des Lilas a
+        //    Lyon » d'un seul tenant verrait son étiquette écartée par l'adresse
+        //    — plus courte, mais à format strict, donc prioritaire — et la ville
+        //    repartirait en clair : le correctif du numéro aurait coûté la
+        //    commune.
+        fusionner_adresses(text, &mut hits);
 
         // 2) Résolution des chevauchements : les détecteurs à format strict
         //    d'abord, puis « la plus longue gagne ». Toute correspondance qui en
@@ -545,9 +614,13 @@ mod tests {
 
         let (clean, tokens) = v.pseudonymize("t1", texte, &terms).await.unwrap();
 
-        assert_eq!(clean, texte, "le texte doit ressortir intact");
-        assert!(
-            tokens.is_empty(),
+        // Les jetons traversent intacts. Le « 47 rue » qui les précède, lui, est
+        // le numéro de voie que la passerelle de l'époque laissait en clair :
+        // depuis `crate::adresse`, il est masqué — c'est le seul changement.
+        assert_eq!(clean, "[ADDRESS_1] [LOC_3], 75002 [LOC_4]");
+        assert_eq!(
+            tokens,
+            vec!["ADDRESS_1".to_string()],
             "aucun jeton ne doit être créé pour un nom de jeton : {tokens:?}"
         );
         // Et surtout : le coffre ne contient pas « LOC_3 » comme valeur.
@@ -566,6 +639,62 @@ mod tests {
             .unwrap();
         assert_eq!(clean, "[PERSON_1] écrit à [EMAIL_1]");
         assert_eq!(tokens, vec!["EMAIL_1".to_string()]);
+    }
+
+    /// Le défaut mesuré en production le 11/11/2026 : « 12 » partait en clair.
+    ///
+    /// Presidio étiquette la voie et la ville, jamais le numéro — un nombre seul
+    /// n'est pas une entité. Le modèle recevait donc « 12 [LOC_1] a [LOC_2] »,
+    /// et un numéro de voie plus une ville suffisent à retrouver un foyer.
+    #[tokio::test]
+    async fn le_numero_de_voie_ne_part_plus_en_clair() {
+        let v = vault();
+        let texte = "Jean Martin habite 12 rue des Lilas a Lyon, jean.martin@exemple.fr";
+        let terms = vec![
+            CustomTerm {
+                typ: "PERSON".into(),
+                value: "Jean Martin".into(),
+            },
+            CustomTerm {
+                typ: "LOC".into(),
+                value: "rue des Lilas".into(),
+            },
+            CustomTerm {
+                typ: "LOC".into(),
+                value: "Lyon".into(),
+            },
+        ];
+
+        let (clean, _) = v.pseudonymize("t1", texte, &terms).await.unwrap();
+
+        assert_eq!(clean, "[PERSON_1] habite [ADDRESS_1] a [LOC_1], [EMAIL_1]");
+        assert!(!clean.contains("12"), "le numéro de voie : {clean}");
+        assert_eq!(
+            v.depseudonymize("t1", &clean).await.unwrap(),
+            texte,
+            "le round-trip doit restituer l'adresse exacte"
+        );
+    }
+
+    /// Un NER qui étiquette la voie ET la ville d'un seul tenant.
+    ///
+    /// L'adresse est plus courte mais à format strict, donc prioritaire : si
+    /// elle écartait ce lieu au lieu de l'absorber, le correctif du numéro
+    /// coûterait la commune, qui repartirait en clair.
+    #[tokio::test]
+    async fn une_adresse_absorbe_le_lieu_quelle_chevauche() {
+        let v = vault();
+        let texte = "habite 12 rue des Lilas a Lyon depuis 2012";
+        let terms = vec![CustomTerm {
+            typ: "LOC".into(),
+            value: "rue des Lilas a Lyon".into(),
+        }];
+
+        let (clean, tokens) = v.pseudonymize("t1", texte, &terms).await.unwrap();
+
+        assert_eq!(clean, "habite [ADDRESS_1] depuis 2012");
+        assert_eq!(tokens, vec!["ADDRESS_1".to_string()]);
+        assert_eq!(v.depseudonymize("t1", &clean).await.unwrap(), texte);
     }
 
     #[tokio::test]

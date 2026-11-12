@@ -365,8 +365,8 @@ curl -X POST https://exemple/v1/pseudonymize \
 ```
 
 Sont détectés automatiquement : e-mails, téléphones, IBAN, cartes bancaires,
-ainsi que noms, villes et organisations. Un terme que la détection ignore peut
-être fourni dans `custom_terms`.
+adresses postales, ainsi que noms, villes et organisations. Un terme que la
+détection ignore peut être fourni dans `custom_terms`.
 
 ## Sans écrire de code : le proxy de filtrage
 
@@ -398,6 +398,10 @@ jamais interprétée ici. Les réponses en flux (SSE) sont prises en charge.
 - **Texte déjà masqué** : renvoyer un texte qui contient des jetons est sans
   danger (historique de conversation, document réindexé). Les jetons présents
   sont sanctuarisés : ils ne sont jamais re-masqués.
+- **Adresses postales** : une adresse part d'un seul jeton `[ADDRESS_1]`,
+  **numéro de voie compris** — c'est lui qui désigne un foyer précis. Un code
+  postal seul, sans numéro ni type de voie devant lui, n'est en revanche pas
+  reconnu : la commune l'est, le code postal reste en clair.
 - **Limites** : au-delà de votre quota, la réponse est un `429` avec un en-tête
   `Retry-After`. `GET /v1/me` indique votre consommation du mois.
 - **Encodage** : le corps doit être en UTF-8, comme l'exige le format JSON.

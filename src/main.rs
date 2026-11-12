@@ -17,6 +17,7 @@
 
 mod accounts;
 mod admin;
+mod adresse;
 mod api;
 mod app;
 mod auth;
