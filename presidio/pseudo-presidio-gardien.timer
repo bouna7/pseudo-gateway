@@ -1,0 +1,14 @@
+[Unit]
+Description=Vérifie toutes les 5 min que la détection automatique sert
+
+[Timer]
+# Au démarrage de la machine, on laisse Docker et la pile se mettre en place.
+OnBootSec=3min
+# Puis toutes les 5 min après la fin de la vérification précédente. Si une
+# reposée est en cours, systemd ne relance pas l'unité : pas de chevauchement.
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=pseudo-presidio-gardien.service
+
+[Install]
+WantedBy=timers.target

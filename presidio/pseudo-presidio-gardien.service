@@ -1,0 +1,17 @@
+[Unit]
+Description=Gardien du Presidio de la passerelle de pseudonymisation
+Documentation=https://github.com/bouna7/pseudo-gateway#presidio-ner-vit-hors-compose
+# Rien à faire si Docker n'est pas là : le gardien n'a aucun sens sans lui.
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+# Les deux variables rendent cette unité indépendante de l'hébergeur :
+#   CHEMIN=/etc/dokploy/compose/<pile>/code
+#   RESEAU=<pile>_default
+EnvironmentFile=/etc/default/pseudo-presidio-gardien
+ExecStart=/bin/sh -c 'exec "$CHEMIN/presidio/pseudo-presidio-gardien.sh"'
+# Reposer le conteneur reconstruit l'image et attend la détection : jusqu'à
+# 2 min de vérification, plus le temps de construction.
+TimeoutStartSec=900

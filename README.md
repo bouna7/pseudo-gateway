@@ -288,9 +288,37 @@ et ne bascule qu'ensuite — en laissant la production intacte s'il échoue. Un
 port qui écoute ne prouve rien : c'est précisément l'erreur qui a coûté les
 2 h 45 de fuite.
 
-Le conteneur posé survit aux redémarrages de la machine, mais **pas** à un
-`docker compose down`. Après chaque opération qui détruit la pile, relancer le
-script, puis vérifier `GET /health/ner` (voir la checklist).
+Le conteneur posé survit aux redémarrages de la machine, mais **pas** à une
+suppression : le 2026-11-11, un conteneur posé ainsi a disparu au cours d'une
+opération de la plateforme que nous n'avons pas identifiée, et plus rien ne
+masquait les noms. D'où le gardien ci-dessous. Après toute opération qui
+détruit la pile, vérifier `GET /health/ner`.
+
+#### Gardien (systemd)
+
+Il appelle Presidio toutes les 5 minutes, exige une **détection**, et repose le
+conteneur sinon. Reposer et non redémarrer : un `docker restart` ne guérit pas
+un Presidio muet, un conteneur recréé hors compose sert correctement.
+
+```bash
+# 1. Les deux chemins de VOTRE instance
+sudo tee /etc/default/pseudo-presidio-gardien >/dev/null <<'EOF'
+CHEMIN=/etc/dokploy/compose/<pile>/code
+RESEAU=<pile>_default
+EOF
+
+# 2. Installer l'unité et son timer
+sudo cp presidio/pseudo-presidio-gardien.service presidio/pseudo-presidio-gardien.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now pseudo-presidio-gardien.timer
+
+# 3. Vérifier
+systemctl list-timers pseudo-presidio-gardien.timer
+sudo systemctl start pseudo-presidio-gardien.service && journalctl -u pseudo-presidio-gardien -n 20 --no-pager
+```
+
+La dernière commande force une vérification immédiate : elle doit afficher
+« Presidio détecte — rien à faire. »
 
 En développement local, où compose se comporte normalement :
 
