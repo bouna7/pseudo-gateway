@@ -34,7 +34,7 @@ services:
   #     docker compose -f docker-compose.images.yml --profile ner-compose up
   presidio:
     profiles: ["ner-compose"]
-    image: ghcr.io/bouna7/pseudo-gateway-presidio:${PGW_VERSION:-0.5.4}
+    image: ghcr.io/bouna7/pseudo-gateway-presidio:${PGW_VERSION:-0.5.5}
     restart: unless-stopped
     environment:
       # Sans marge, le chargement du modèle spaCy depasse le délai par défaut du
@@ -49,7 +49,7 @@ services:
       start_period: 120s
 
   gateway:
-    image: ghcr.io/bouna7/pseudo-gateway:${PGW_VERSION:-0.5.4}
+    image: ghcr.io/bouna7/pseudo-gateway:${PGW_VERSION:-0.5.5}
     environment:
       # Imposé par cette pile : les trois services se parlent par le réseau interne.
       VAULT_STORE: redis
