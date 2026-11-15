@@ -423,6 +423,7 @@ jamais interprétée ici. Les réponses en flux (SSE) sont prises en charge.
         crate::admin::reindex,
         crate::admin::create_account, crate::admin::list_accounts, crate::admin::get_account,
         crate::admin::update_account, crate::admin::issue_key, crate::admin::revoke_key,
+        crate::admin::list_espaces, crate::admin::sonder,
         crate::admin::create_invitation, crate::admin::list_invitations,
         crate::admin::revoke_invitation, crate::admin::rotate_admin_key,
     ),

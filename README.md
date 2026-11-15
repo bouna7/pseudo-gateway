@@ -475,7 +475,22 @@ librement son `tenant_id`, comme avant. Ne la donnez jamais à un tiers.
 | `GET /admin/ui` | — (la page demande la clé) | **Console** : créer des comptes et des clés depuis un navigateur (`ENABLE_ADMIN_UI=true`) |
 | `POST/GET /admin/accounts`, `GET/PATCH /admin/accounts/{id}` | `X-Admin-Key` | Créer, lister, modifier, désactiver |
 | `POST /admin/accounts/{id}/keys`, `DELETE …/keys/{key_id}` | `X-Admin-Key` | Rotation / révocation de clé |
+| `GET /admin/accounts/{id}/espaces` | `X-Admin-Key` | Espaces de jetons du compte, et le `tenant_id` qui vise chacun |
+| `POST /admin/accounts/{id}/sonde` | `X-Admin-Key` | Pourquoi un jeton n'est pas restitué — **sans rendre la valeur** |
 | `POST/GET /admin/invitations`, `DELETE /admin/invitations/{code}` | `X-Admin-Key` | Liens d'invitation : créer, suivre, révoquer |
+
+**Un jeton qui ne revient pas.** Une restitution qui laisse `[EMAIL_1]` intact
+et l'inscrit dans `unresolved` a deux causes, que l'API publique ne distingue
+pas : le jeton n'existe pas dans l'espace visé, ou son blob est chiffré sous une
+clé qui n'est plus chargée. La première est de loin la plus fréquente — les
+données vivent dans un sous-espace (`acc_…:delta-weaver`) et l'appel vise
+l'espace nu du compte. Le nom d'un sous-espace est choisi par l'appelant au
+moment du masquage et n'est inscrit nulle part ailleurs : il fallait le lire
+dans les journaux. Le bouton **Espaces** d'un compte, dans la console, liste
+désormais ses espaces avec leur nombre de jetons et la valeur exacte à passer en
+`tenant_id`, et une sonde dit laquelle des deux causes s'applique — sans jamais
+afficher la valeur, pour que la clé d'administration ne devienne pas un moyen de
+lire les données personnelles.
 
 **Première ouverture de la console.** Si `ADMIN_API_KEY` n'est pas définie, le
 service crée une clé au premier démarrage et l'affiche dans ses journaux :

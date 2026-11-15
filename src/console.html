@@ -224,6 +224,95 @@
     $("nouvelle-cle").prepend(boite);
   }
 
+  // Le nom d'un sous-espace est choisi par l'appelant au moment du masquage et
+  // n'est inscrit nulle part ailleurs : jusqu'ici il fallait le lire dans les
+  // journaux du service. On restitue alors sur l'espace nu du compte, les
+  // jetons ressortent intacts, et rien ne dit que les données sont ailleurs.
+  function ligneEspaces(compte, liste) {
+    const tr = el("tr");
+    const td = el("td");
+    td.colSpan = 5;
+    td.style.background = "var(--fond2)";
+
+    if (!liste.length) {
+      td.appendChild(el("p", "Aucun jeton pour ce compte : rien n'a encore été masqué.", "vide"));
+    } else {
+      const table = el("table");
+      const thead = el("thead");
+      const trh = el("tr");
+      ["tenant_id à envoyer", "Espace interne", "Jetons"].forEach((t) => trh.appendChild(el("th", t)));
+      thead.appendChild(trh);
+      const tbody = el("tbody");
+      liste.forEach((e) => {
+        const l = el("tr");
+        const quoi = el("td");
+        quoi.appendChild(e.tenant_id
+          ? el("code", e.tenant_id)
+          : el("span", "aucun — appel sans tenant_id", "vide"));
+        l.appendChild(quoi);
+        l.appendChild(el("td", e.espace, "mono sous"));
+        l.appendChild(el("td", String(e.jetons)));
+        tbody.appendChild(l);
+      });
+      table.append(thead, tbody);
+      td.appendChild(table);
+    }
+
+    // Sonde : un jeton laissé intact peut l'être pour deux raisons que l'API
+    // publique ne distingue pas. Ici on le dit, sans afficher la valeur.
+    const f = el("fieldset");
+    f.style.margin = "16px 0 0";
+    f.appendChild(el("legend", "Un jeton ne revient pas ?"));
+    const ligne = el("div", undefined, "ligne");
+
+    const idTok = `tok-${compte.id}`;
+    const idTen = `ten-${compte.id}`;
+    const gTok = el("div");
+    const lTok = el("label", "Jeton");
+    lTok.htmlFor = idTok;
+    const inTok = document.createElement("input");
+    inTok.id = idTok;
+    inTok.placeholder = "PERSON_1";
+    gTok.append(lTok, inTok);
+
+    const gTen = el("div");
+    const lTen = el("label", "tenant_id (vide = espace nu du compte)");
+    lTen.htmlFor = idTen;
+    const inTen = document.createElement("input");
+    inTen.id = idTen;
+    inTen.placeholder = "delta-weaver";
+    gTen.append(lTen, inTen);
+
+    ligne.append(gTok, gTen);
+    f.appendChild(ligne);
+
+    const actions = el("div", undefined, "actions");
+    const btn = el("button", "Sonder", "principal");
+    const verdict = el("p", undefined, "sous");
+    verdict.style.margin = "12px 0 0";
+    btn.onclick = async () => {
+      btn.disabled = true;
+      verdict.textContent = "";
+      try {
+        const corps = { token: inTok.value };
+        if (inTen.value.trim()) corps.tenant_id = inTen.value.trim();
+        const r = await api("POST", `/admin/accounts/${compte.id}/sonde`, corps);
+        verdict.textContent = r.message;
+        verdict.style.color = r.etat === "restituable" ? "var(--ok)" : "var(--danger)";
+      } catch (e) {
+        verdict.textContent = e.message;
+        verdict.style.color = "var(--danger)";
+      } finally {
+        btn.disabled = false;
+      }
+    };
+    actions.appendChild(btn);
+    f.append(actions, verdict);
+    td.appendChild(f);
+    tr.appendChild(td);
+    return tr;
+  }
+
   function lignesCompte(compte) {
     const tr = el("tr");
     const nom = el("td");
@@ -260,10 +349,33 @@
       const r = await api("POST", `/admin/accounts/${compte.id}/keys`);
       montrerCle(r.account, r.api_key, false);
     });
+    // Hors de `agir` : celui-ci recharge la liste, ce qui effacerait le
+    // panneau qu'on vient d'ouvrir.
+    const espaces = el("button", "Espaces", "lien");
+    let detail = null;
+    espaces.onclick = async () => {
+      if (detail) {
+        detail.remove();
+        detail = null;
+        espaces.textContent = "Espaces";
+        return;
+      }
+      effacer();
+      espaces.disabled = true;
+      try {
+        detail = ligneEspaces(compte, await api("GET", `/admin/accounts/${compte.id}/espaces`));
+        tr.after(detail);
+        espaces.textContent = "Masquer";
+      } catch (e) {
+        afficher(e.message);
+      } finally {
+        espaces.disabled = false;
+      }
+    };
     const bascule = el("button", compte.disabled ? "Réactiver" : "Désactiver", "lien");
     bascule.onclick = () => agir(bascule, () =>
       api("PATCH", `/admin/accounts/${compte.id}`, { disabled: !compte.disabled }));
-    actions.append(nouvelle, bascule);
+    actions.append(nouvelle, espaces, bascule);
     tr.appendChild(actions);
     return tr;
   }

@@ -63,6 +63,126 @@ pub async fn reindex(
     }))
 }
 
+/// Un espace de jetons du compte, et ce qu'il faut envoyer pour le viser.
+#[derive(Serialize, ToSchema)]
+pub struct EspaceView {
+    /// Nom interne complet : `acc_…` ou `acc_…:<sous-espace>`.
+    #[schema(example = "acc_ba3a0848af0f418a:delta-weaver")]
+    pub espace: String,
+    /// Valeur à passer en `tenant_id` pour viser cet espace. Absente pour
+    /// l'espace nu du compte, qui correspond à un appel **sans** `tenant_id`.
+    #[schema(example = "delta-weaver")]
+    pub tenant_id: Option<String>,
+    /// Nombre de jetons rangés là.
+    pub jetons: usize,
+}
+
+/// Espaces de jetons d'un compte, avec leur taille.
+///
+/// Le nom d'un sous-espace est choisi par l'appelant au moment du masquage et
+/// n'était consultable nulle part : il fallait le lire dans les journaux. D'où
+/// des restitutions lancées sur l'espace nu du compte, qui rendent les jetons
+/// intacts alors que les données sont bien là, dans un sous-espace.
+#[utoipa::path(get, path = "/admin/accounts/{id}/espaces", tag = "admin",
+    security(("admin_key" = [])),
+    params(("id" = String, Path, description = "Identifiant du compte")),
+    responses((status = 200, body = Vec<EspaceView>), (status = 404, body = ErrorBody)))]
+pub async fn list_espaces(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<EspaceView>>, AppError> {
+    let account = accounts(&st)?.get(&id).await?;
+    let prefix = format!("{}:", account.id);
+    let espaces = st.vault.espaces(&account.id).await?;
+    Ok(Json(
+        espaces
+            .into_iter()
+            .map(|(espace, jetons)| EspaceView {
+                tenant_id: espace.strip_prefix(&prefix).map(str::to_string),
+                espace,
+                jetons,
+            })
+            .collect(),
+    ))
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct SondeReq {
+    /// Sous-espace visé, tel qu'il serait passé en `tenant_id`. Absent = espace
+    /// nu du compte.
+    #[schema(example = "delta-weaver")]
+    pub tenant_id: Option<String>,
+    /// Nom du jeton, avec ou sans crochets.
+    #[schema(example = "PERSON_1")]
+    pub token: String,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct SondeResp {
+    /// Espace effectivement interrogé.
+    pub espace: String,
+    pub token: String,
+    /// `restituable`, `absent`, ou `cle_manquante`.
+    pub etat: &'static str,
+    /// Phrase prête à afficher.
+    pub message: String,
+}
+
+/// Dit si un jeton serait restitué dans un espace donné, **sans rendre la valeur**.
+///
+/// Vu de l'API publique, « jeton inconnu ici » et « jeton chiffré sous une clé
+/// absente » se ressemblent : les deux laissent le jeton intact et l'inscrivent
+/// dans `unresolved`. Cette sonde les distingue, et reste sûre pour
+/// l'administration — la clé `pga_…` ne doit pas devenir un moyen de lire les
+/// données personnelles, donc seul le sort du jeton est rendu.
+#[utoipa::path(post, path = "/admin/accounts/{id}/sonde", tag = "admin",
+    request_body = SondeReq, security(("admin_key" = [])),
+    params(("id" = String, Path, description = "Identifiant du compte")),
+    responses((status = 200, body = SondeResp), (status = 400, body = ErrorBody),
+              (status = 404, body = ErrorBody)))]
+pub async fn sonder(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    ApiJson(req): ApiJson<SondeReq>,
+) -> Result<Json<SondeResp>, AppError> {
+    let account = accounts(&st)?.get(&id).await?;
+    let espace = account.tenant(req.tenant_id.as_deref())?;
+    // Le jeton se copie souvent depuis un texte, crochets compris.
+    let token = req.token.trim().trim_start_matches('[').trim_end_matches(']');
+    if token.is_empty() {
+        return Err(AppError::BadRequest(
+            "token : nom du jeton attendu, par exemple « PERSON_1 »".into(),
+        ));
+    }
+    let (etat, message) = match st.vault.sonder(&espace, token).await? {
+        crate::pseudonymize::Sonde::Restituable => (
+            "restituable",
+            format!("« {token} » est présent dans {espace} et sa valeur est lisible."),
+        ),
+        crate::pseudonymize::Sonde::Absent => (
+            "absent",
+            format!(
+                "aucun jeton « {token} » dans {espace}. Le masquage a eu lieu \
+                 dans un autre espace : vérifiez le `tenant_id` de l'appel."
+            ),
+        ),
+        crate::pseudonymize::Sonde::CleManquante => (
+            "cle_manquante",
+            format!(
+                "« {token} » est présent dans {espace} mais chiffré sous une clé \
+                 absente de l'environnement. Remettez l'ancienne PSEUDO_KEY_<id> \
+                 en place : la restitution le laisse intact tant qu'elle manque."
+            ),
+        ),
+    };
+    Ok(Json(SondeResp {
+        espace,
+        token: token.to_string(),
+        etat,
+        message,
+    }))
+}
+
 /// Crée un compte et sa première clé d'API.
 #[utoipa::path(post, path = "/admin/accounts", tag = "admin",
     request_body = CreateAccountReq, security(("admin_key" = [])),

@@ -87,6 +87,19 @@ pub struct Restitution {
     pub non_resolus: Vec<String>,
 }
 
+/// Verdict d'une sonde de jeton. Jamais la valeur : seulement son sort.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sonde {
+    /// Aucun jeton de ce nom dans cet espace. Cause quasi systématique : le
+    /// masquage a eu lieu dans un autre espace (sous-espace oublié).
+    Absent,
+    /// Jeton présent, mais chiffré sous une version de clé qui n'est plus
+    /// chargée. La restitution le laisserait intact, comme s'il était inconnu.
+    CleManquante,
+    /// Jeton présent et déchiffrable : la restitution rend la valeur.
+    Restituable,
+}
+
 /// Une correspondance détectée dans le texte : plage d'octets + type + valeur.
 struct Hit {
     start: usize,
@@ -223,6 +236,29 @@ impl Vault {
             }
         }
         Ok((total, aliased))
+    }
+
+    /// Espaces de jetons dont le nom commence par `prefix`, avec leur taille.
+    pub async fn espaces(&self, prefix: &str) -> Result<Vec<(String, usize)>, VaultError> {
+        self.store.espaces(prefix).await
+    }
+
+    /// Dit si un jeton serait restitué dans cet espace, **sans rendre la valeur**.
+    ///
+    /// Vu de l'API publique, « jeton inconnu dans cet espace » et « blob chiffré
+    /// sous une clé qui n'est plus chargée » se ressemblent : les deux laissent
+    /// le jeton intact et l'inscrivent dans `unresolved`. Les distinguer
+    /// demandait de lire les journaux. Cette sonde répond directement, et elle
+    /// reste sûre pour l'administration : elle déchiffre pour vérifier, puis
+    /// jette la valeur.
+    pub async fn sonder(&self, tenant: &str, token: &str) -> Result<Sonde, VaultError> {
+        Ok(match self.store.blob_for_token(tenant, token).await? {
+            None => Sonde::Absent,
+            Some(blob) => match self.keyring.decrypt(&blob) {
+                Some(_) => Sonde::Restituable,
+                None => Sonde::CleManquante,
+            },
+        })
     }
 
     /// Remplace les données sensibles par des jetons. Renvoie le texte « propre »
@@ -404,6 +440,52 @@ mod tests {
     fn vault() -> Vault {
         let keyring = Keyring::from_master(&[7u8; 32]);
         Vault::new(keyring, Arc::new(InMemoryVaultStore::new()))
+    }
+
+    /// Les deux causes d'un jeton laissé intact, que l'API publique confond.
+    #[tokio::test]
+    async fn la_sonde_distingue_le_mauvais_espace_de_la_cle_absente() {
+        let store = Arc::new(InMemoryVaultStore::new());
+        let v = Vault::new(Keyring::from_master(&[7u8; 32]), store.clone());
+        v.pseudonymize("acc_1:delta-weaver", "jean@exemple.fr", &[])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            v.sonder("acc_1:delta-weaver", "EMAIL_1").await.unwrap(),
+            Sonde::Restituable
+        );
+        // Même compte, mais l'espace nu : le jeton n'y est pas.
+        assert_eq!(v.sonder("acc_1", "EMAIL_1").await.unwrap(), Sonde::Absent);
+
+        // Même coffre, clé de chiffrement remplacée : le blob est là, illisible.
+        let autre = Vault::new(Keyring::from_master(&[8u8; 32]), store);
+        assert_eq!(
+            autre.sonder("acc_1:delta-weaver", "EMAIL_1").await.unwrap(),
+            Sonde::CleManquante
+        );
+    }
+
+    /// L'énumération ne franchit pas la frontière d'un compte.
+    #[tokio::test]
+    async fn les_espaces_se_listent_par_compte() {
+        let v = vault();
+        v.pseudonymize("acc_1", "jean@exemple.fr", &[]).await.unwrap();
+        v.pseudonymize("acc_1:delta-weaver", "marie@exemple.fr", &[])
+            .await
+            .unwrap();
+        v.pseudonymize("acc_2:ailleurs", "paul@exemple.fr", &[])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            v.espaces("acc_1").await.unwrap(),
+            vec![("acc_1".to_string(), 1), ("acc_1:delta-weaver".to_string(), 1)]
+        );
+        assert_eq!(
+            v.espaces("acc_2").await.unwrap(),
+            vec![("acc_2:ailleurs".to_string(), 1)]
+        );
     }
 
     #[tokio::test]

@@ -51,6 +51,16 @@ pub trait VaultStore: Send + Sync {
     /// toujours pas lire le clair, c'est l'appelant qui déchiffre avec la clé.
     async fn tokens(&self, tenant: &str) -> Result<Vec<(String, Vec<u8>)>, VaultError>;
 
+    /// Espaces de jetons dont le nom commence par `prefix`, chacun avec son
+    /// nombre de jetons.
+    ///
+    /// Le nom d'un sous-espace ne se déduit d'aucun réglage : il est choisi par
+    /// l'appelant au moment du masquage (`tenant_id`), et rien ne le conserve
+    /// ailleurs. Sans cette énumération, le seul moyen de le retrouver était de
+    /// le lire dans les journaux — d'où des restitutions lancées sur le mauvais
+    /// espace, qui rendent le jeton intact sans dire pourquoi.
+    async fn espaces(&self, prefix: &str) -> Result<Vec<(String, usize)>, VaultError>;
+
     /// Sonde de disponibilité du backend (utilisée par `GET /health`).
     /// Par défaut : toujours disponible (cas du store en mémoire).
     async fn ping(&self) -> Result<(), VaultError> {
@@ -147,6 +157,28 @@ impl VaultStore for InMemoryVaultStore {
             .map(|((_, tok), blob)| (tok.clone(), blob.clone()))
             .collect())
     }
+
+    async fn espaces(&self, prefix: &str) -> Result<Vec<(String, usize)>, VaultError> {
+        let guard = self.inner.lock().map_err(|_| VaultError::Poisoned)?;
+        let mut comptes: HashMap<&str, usize> = HashMap::new();
+        for (tenant, _) in guard.tokens.keys() {
+            if tenant.starts_with(prefix) {
+                *comptes.entry(tenant.as_str()).or_insert(0) += 1;
+            }
+        }
+        Ok(trier(comptes))
+    }
+}
+
+/// Espaces classés par nom : un ordre stable rend la liste lisible dans la
+/// console et le test reproductible.
+fn trier(comptes: HashMap<&str, usize>) -> Vec<(String, usize)> {
+    let mut out: Vec<(String, usize)> = comptes
+        .into_iter()
+        .map(|(t, n)| (t.to_string(), n))
+        .collect();
+    out.sort_unstable();
+    out
 }
 
 /// Création atomique d'un jeton, côté serveur Redis (évite toute course entre
@@ -195,6 +227,35 @@ impl RedisVaultStore {
     /// Préfixe namespacé par tenant, avec hash tag Redis Cluster : `pg:{<tenant>}`.
     fn ns(tenant: &str) -> String {
         format!("pg:{{{tenant}}}")
+    }
+
+    /// Clés correspondant à `pattern`.
+    ///
+    /// SCAN plutôt que KEYS : KEYS bloque Redis le temps du parcours, ce qui
+    /// suspend toutes les pseudonymisations en cours. Curseur explicite plutôt
+    /// que l'itérateur de la bibliothèque : l'API du curseur est stable d'une
+    /// version de `redis` à l'autre.
+    async fn scan(&self, pattern: &str) -> Result<Vec<String>, VaultError> {
+        let mut conn = self.conn.clone();
+        let mut keys: Vec<String> = Vec::new();
+        let mut cursor: u64 = 0;
+        loop {
+            let (next, batch): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(pattern)
+                .arg("COUNT")
+                .arg(500)
+                .query_async(&mut conn)
+                .await
+                .map_err(|e| VaultError::Store(e.to_string()))?;
+            keys.extend(batch);
+            if next == 0 {
+                break;
+            }
+            cursor = next;
+        }
+        Ok(keys)
     }
 }
 
@@ -267,31 +328,8 @@ impl VaultStore for RedisVaultStore {
 
     async fn tokens(&self, tenant: &str) -> Result<Vec<(String, Vec<u8>)>, VaultError> {
         let prefix = format!("{}:tok:", Self::ns(tenant));
-        let pattern = format!("{prefix}*");
+        let keys = self.scan(&format!("{prefix}*")).await?;
         let mut conn = self.conn.clone();
-
-        // SCAN plutôt que KEYS : KEYS bloque Redis le temps du parcours, ce qui
-        // suspend toutes les pseudonymisations en cours. Curseur explicite
-        // plutôt que l'itérateur de la bibliothèque : l'API du curseur est
-        // stable d'une version de `redis` à l'autre.
-        let mut keys: Vec<String> = Vec::new();
-        let mut cursor: u64 = 0;
-        loop {
-            let (next, batch): (u64, Vec<String>) = redis::cmd("SCAN")
-                .arg(cursor)
-                .arg("MATCH")
-                .arg(&pattern)
-                .arg("COUNT")
-                .arg(500)
-                .query_async(&mut conn)
-                .await
-                .map_err(|e| VaultError::Store(e.to_string()))?;
-            keys.extend(batch);
-            if next == 0 {
-                break;
-            }
-            cursor = next;
-        }
 
         let mut out = Vec::with_capacity(keys.len());
         for key in keys {
@@ -304,6 +342,28 @@ impl VaultStore for RedisVaultStore {
             }
         }
         Ok(out)
+    }
+
+    async fn espaces(&self, prefix: &str) -> Result<Vec<(String, usize)>, VaultError> {
+        // Le nom d'un espace ne contient que [A-Za-z0-9._-] et le « : » qui
+        // sépare le compte du sous-espace (cf. accounts::validate_sub_tenant) :
+        // aucun caractère de motif Redis à échapper ici.
+        let keys = self.scan(&format!("pg:{{{prefix}*}}:tok:*")).await?;
+        let mut comptes: HashMap<&str, usize> = HashMap::new();
+        for key in &keys {
+            // `pg:{<espace>}:tok:<jeton>` — un nom d'espace ne peut pas
+            // contenir « } », donc la première accolade fermante le termine.
+            let Some(reste) = key.strip_prefix("pg:{") else {
+                continue;
+            };
+            let Some((espace, _)) = reste.split_once("}:tok:") else {
+                continue;
+            };
+            if espace.starts_with(prefix) {
+                *comptes.entry(espace).or_insert(0) += 1;
+            }
+        }
+        Ok(trier(comptes))
     }
 
     async fn ping(&self) -> Result<(), VaultError> {

@@ -210,6 +210,8 @@ pub fn router(state: AppState, cfg: &HttpConfig) -> Router {
             .route("/admin/key", post(admin::rotate_admin_key))
             .route("/admin/reindex/:tenant", post(admin::reindex))
             .route("/admin/accounts/:id/keys", post(admin::issue_key))
+            .route("/admin/accounts/:id/espaces", get(admin::list_espaces))
+            .route("/admin/accounts/:id/sonde", post(admin::sonder))
             .route(
                 "/admin/accounts/:id/keys/:key_id",
                 delete(admin::revoke_key),
@@ -729,6 +731,76 @@ mod tests {
         )
         .await;
         assert_eq!(s, StatusCode::UNAUTHORIZED);
+    }
+
+    /// Ce que la console doit répondre quand une restitution rend les jetons
+    /// intacts. Le cas vécu : les données vivaient dans un sous-espace, l'appel
+    /// visait l'espace nu du compte, et rien ne le disait — le nom du
+    /// sous-espace ne se lisait que dans les journaux.
+    #[tokio::test]
+    async fn la_console_retrouve_le_sous_espace_et_son_jeton() {
+        std::env::set_var("PRESIDIO_URL", "http://127.0.0.1:1"); // NER indisponible → regex
+        let app = app(state(0));
+
+        let (_, a) = call(
+            &app,
+            "POST",
+            "/admin/accounts",
+            Some(("x-admin-key", "admin")),
+            json!({"name": "A"}),
+        )
+        .await;
+        let id = a["account"]["id"].as_str().unwrap().to_string();
+        let key = format!("Bearer {}", a["api_key"].as_str().unwrap());
+
+        let _ = call(
+            &app,
+            "POST",
+            "/v1/pseudonymize",
+            Some(("authorization", &key)),
+            json!({"text": "marie@exemple.fr", "tenant_id": "delta-weaver"}),
+        )
+        .await;
+
+        // La liste donne la valeur exacte à renvoyer en `tenant_id`.
+        let (s, espaces) = call(
+            &app,
+            "GET",
+            &format!("/admin/accounts/{id}/espaces"),
+            Some(("x-admin-key", "admin")),
+            json!({}),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(espaces[0]["tenant_id"], "delta-weaver");
+        assert_eq!(espaces[0]["espace"], format!("{id}:delta-weaver"));
+        assert_eq!(espaces[0]["jetons"], 1);
+
+        // Sonde dans le bon espace : restituable. Les crochets sont tolérés,
+        // on copie un jeton depuis un texte.
+        let (s, r) = call(
+            &app,
+            "POST",
+            &format!("/admin/accounts/{id}/sonde"),
+            Some(("x-admin-key", "admin")),
+            json!({"token": "[EMAIL_1]", "tenant_id": "delta-weaver"}),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(r["etat"], "restituable");
+
+        // Sans `tenant_id` : l'espace nu du compte, où le jeton n'est pas.
+        let (_, r) = call(
+            &app,
+            "POST",
+            &format!("/admin/accounts/{id}/sonde"),
+            Some(("x-admin-key", "admin")),
+            json!({"token": "EMAIL_1"}),
+        )
+        .await;
+        assert_eq!(r["etat"], "absent");
+        // Et jamais la valeur : la clé d'administration ne lit pas les données.
+        assert!(!serde_json::to_string(&r).unwrap().contains("marie@exemple.fr"));
     }
 
     /// Toutes les erreurs — y compris celles du corps de requête et des routes
